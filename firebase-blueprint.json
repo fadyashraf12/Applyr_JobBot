@@ -1,0 +1,171 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Root user profile containing general configurations and flags",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "onboardingComplete": { "type": "boolean" },
+        "botState": { "type": "string" },
+        "activeProfileId": { "type": "string" },
+        "monitoringChannelId": { "type": "string" }
+      },
+      "required": ["uid", "email", "onboardingComplete", "botState", "activeProfileId"]
+    },
+    "GoogleConfig": {
+      "title": "GoogleConfig",
+      "description": "Google encrypted credentials and syncing handles under users/{uid}/config/google",
+      "type": "object",
+      "properties": {
+        "connectedEmail": { "type": "string" },
+        "accessToken": { "type": "string" },
+        "refreshToken": { "type": "string" },
+        "tokenExpiry": { "type": "number" },
+        "driveConnected": { "type": "boolean" },
+        "gmailConnected": { "type": "boolean" },
+        "vaultFolderId": { "type": "string" },
+        "vaultFolderName": { "type": "string" },
+        "gmailWatchExpiry": { "type": "string", "format": "date-time" },
+        "gmailHistoryId": { "type": "string" }
+      },
+      "required": ["connectedEmail", "accessToken", "refreshToken", "tokenExpiry", "driveConnected", "gmailConnected", "vaultFolderId"]
+    },
+    "Profile": {
+      "title": "Profile",
+      "description": "Named CV layout profile under users/{uid}/profiles/{id}",
+      "type": "object",
+      "properties": {
+        "profileId": { "type": "string" },
+        "name": { "type": "string" },
+        "driveFolderId": { "type": "string" },
+        "masterCvFileId": { "type": "string" },
+        "coverLetterTemplateFileId": { "type": "string" },
+        "headshotFileId": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["profileId", "name", "driveFolderId", "isActive", "createdAt"]
+    },
+    "Application": {
+      "title": "Application",
+      "description": "Job application document under users/{uid}/applications/{id}",
+      "type": "object",
+      "properties": {
+        "applicationId": { "type": "string" },
+        "profileId": { "type": "string" },
+        "company": { "type": "string" },
+        "jobTitle": { "type": "string" },
+        "jobDescription": { "type": "string" },
+        "hrEmail": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "interview", "offer", "rejected", "ghosted"] },
+        "appliedAt": { "type": "string", "format": "date-time" },
+        "tailoredCvFileId": { "type": "string" },
+        "emailSubject": { "type": "string" },
+        "emailBody": { "type": "string" },
+        "notes": { "type": "string" },
+        "followUpDate": { "type": "string", "format": "date-time" },
+        "contacts": { "type": "array" },
+        "recruiterReplied": { "type": "boolean" },
+        "lastReplyAt": { "type": "string", "format": "date-time" },
+        "lastReplySnippet": { "type": "string" },
+        "sourceType": { "type": "string", "enum": ["image", "text", "pdf"] }
+      },
+      "required": ["applicationId", "profileId", "company", "jobTitle", "hrEmail", "status", "appliedAt", "tailoredCvFileId", "sourceType"]
+    },
+    "Draft": {
+      "title": "Draft",
+      "description": "Temporary in-progress job application package under users/{uid}/drafts/{id}",
+      "type": "object",
+      "properties": {
+        "draftId": { "type": "string" },
+        "profileId": { "type": "string" },
+        "company": { "type": "string" },
+        "jobTitle": { "type": "string" },
+        "hrEmail": { "type": "string" },
+        "hrEmailConfirmed": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["awaiting_email_confirm", "awaiting_approval", "editing_email"] },
+        "tailoredCvFileId": { "type": "string" },
+        "emailSubject": { "type": "string" },
+        "emailBody": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["draftId", "profileId", "company", "jobTitle", "hrEmailConfirmed", "status", "tailoredCvFileId", "createdAt"]
+    },
+    "BotSession": {
+      "title": "BotSession",
+      "description": "State transition logs under users/{uid}/botSession/current",
+      "type": "object",
+      "properties": {
+        "botState": { "type": "string" },
+        "targetSlot": { "type": "string" },
+        "targetProfileId": { "type": "string" },
+        "activeDraftId": { "type": "string" },
+        "lastMessageId": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["botState", "updatedAt"]
+    },
+    "TelegramMapping": {
+      "title": "TelegramMapping",
+      "description": "Global user map under telegram_mappings/{id}",
+      "type": "object",
+      "properties": {
+        "telegramUserId": { "type": "string" },
+        "firebaseUid": { "type": "string" },
+        "linkedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["telegramUserId", "firebaseUid", "linkedAt"]
+    },
+    "PairingToken": {
+      "title": "PairingToken",
+      "description": "Short-lived temporary connection tokens under pairing_tokens/{token}",
+      "type": "object",
+      "properties": {
+        "token": { "type": "string" },
+        "firebaseUid": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "used": { "type": "boolean" }
+      },
+      "required": ["token", "firebaseUid", "createdAt", "expiresAt", "used"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Root details of Applyr seekers"
+    },
+    "/users/{userId}/config/google": {
+      "schema": "GoogleConfig",
+      "description": "Authorized Google token stores for seekers"
+    },
+    "/users/{userId}/profiles/{profileId}": {
+      "schema": "Profile",
+      "description": "Profiles for targeted domains e.g. engineering vs leadership"
+    },
+    "/users/{userId}/applications/{applicationId}": {
+      "schema": "Application",
+      "description": "Logged CRM career progress tracker logs"
+    },
+    "/users/{userId}/drafts/{draftId}": {
+      "schema": "Draft",
+      "description": "Transient processing application packets"
+    },
+    "/users/{userId}/botSession/current": {
+      "schema": "BotSession",
+      "description": "Conversation progress for direct chats"
+    },
+    "/telegram_mappings/{mappingId}": {
+      "schema": "TelegramMapping",
+      "description": "Maps Telegram standard chat IDs to Firebase Auth UIDs"
+    },
+    "/pairing_tokens/{token}": {
+      "schema": "PairingToken",
+      "description": "UUID mapping keys with expiration caps at 15 minutes"
+    }
+  }
+}

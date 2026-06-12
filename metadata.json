@@ -1,0 +1,6 @@
+{
+  "name": "Applyr",
+  "description": "Full-stack job application tracker and automation platform using Telegram and Gmail.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
