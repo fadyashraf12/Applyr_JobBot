@@ -1,14 +1,13 @@
 import express from 'express';
 import { randomUUID } from 'crypto';
 import { Timestamp } from 'firebase-admin/firestore';
+import { google } from 'googleapis';
 import { buildAuthUrl, exchangeCodeForTokens, getValidAccessToken } from '../lib/google/oauth';
 import { encrypt } from '../lib/crypto';
 import { getAdminDb, getAdminAuth } from '../lib/firebase/admin';
 import { watchInbox } from '../lib/google/gmail';
 import { logError } from '../lib/logger';
 import { getAuthorizedUid } from './auth';
-import { telegramWebhookHandler } from './telegramWebhook';
-import { gmailWebhookHandler } from './gmailWebhook';
 
 export function createApp(): express.Express {
   const app = express();
@@ -92,7 +91,6 @@ export function createApp(): express.Express {
       if (uidOrFlow === 'login_flow') {
         try {
           // Get the user info from the Google token
-          const { google } = require('googleapis');
           const googleAuth = new google.auth.OAuth2(
             process.env.GOOGLE_CLIENT_ID,
             process.env.GOOGLE_CLIENT_SECRET
@@ -521,10 +519,26 @@ export function createApp(): express.Express {
   });
 
   // Telegram webhook
-  app.post('/api/telegram/webhook', telegramWebhookHandler);
+  app.post('/api/telegram/webhook', async (req, res) => {
+    try {
+      const { telegramWebhookHandler } = await import('./telegramWebhook');
+      return telegramWebhookHandler(req, res);
+    } catch (error) {
+      logError('telegram-webhook-load', error);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  });
 
   // Gmail webhook
-  app.post('/api/gmail/webhook', gmailWebhookHandler);
+  app.post('/api/gmail/webhook', async (req, res) => {
+    try {
+      const { gmailWebhookHandler } = await import('./gmailWebhook');
+      return gmailWebhookHandler(req, res);
+    } catch (error) {
+      logError('gmail-webhook-load', error);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  });
 
   // 404 fallback
   app.use((req, res) => {
