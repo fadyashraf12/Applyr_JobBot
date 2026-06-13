@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { doc, onSnapshot, updateDoc, setDoc } from 'firebase/firestore';
-import { db } from '../../lib/firebase/client';
+import { db, auth } from '../../lib/firebase/client';
 import StepConnectGoogle from './StepConnectGoogle';
 import StepCreateVault from './StepCreateVault';
 
@@ -36,6 +36,23 @@ export default function OnboardingWizard({ uid, onComplete }: OnboardingWizardPr
   const gmailConnected = googleConfig?.gmailConnected === true;
 
   const handleFinish = async () => {
+    // Fire-and-forget watch setup
+    (async () => {
+      try {
+        const token = await auth.currentUser?.getIdToken();
+        if (token) {
+          await fetch(`/api/gmail/watch?uid=${uid}`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${token}`
+            }
+          });
+        }
+      } catch (err) {
+        console.warn('Silent failure on initial GMail watch registration', err);
+      }
+    })();
+
     try {
       // Set onboardingComplete to true
       await updateDoc(doc(db, `users/${uid}`), {

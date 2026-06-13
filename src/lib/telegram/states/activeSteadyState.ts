@@ -12,8 +12,9 @@ import { buildDocx } from '../../documents/buildDocx';
 import { convertToPdf } from '../../documents/convertToPdf';
 import { uploadFile, downloadFile as downloadDriveFile } from '../../google/drive';
 import { callGeminiVision } from '../../ai/gemini';
-import * as pdfParse_ from 'pdf-parse';
-const pdfParse = (pdfParse_ as any).default || pdfParse_;
+import { extractTextFromUpdate } from '../extractText';
+import { sendReviewPackage } from '../reviewPackage';
+import { DraftDoc } from '../../../types/firestore';
 
 export async function handleActiveSteadyState(
   update: TelegramUpdate,
@@ -43,14 +44,12 @@ export async function handleActiveSteadyState(
       await handleProfileSwitch(chatId, text, context);
     } else if (classification.type === 'NATURAL_COMMAND') {
       await handleNaturalCommand(chatId, text, context);
+    } else if (classification.type === 'SET_MONITORING_CHANNEL') {
+      await handleSetMonitoringChannel(chatId, text, context);
     } else {
-      // Default fallback messaging
       await sendMessage(
         chatId,
-        `⚙️ **Applyr Assistant**\n\n` +
-        `Forward or paste a job posting to initiate the application process.\n\n` +
-        `Alternatively, send commands to modify your active CV directly (e.g. *"Add Docker and Kubernetes to my skills Section"*) or switch CV profiles.`,
-        { parse_mode: 'Markdown' }
+        `I didn't quite understand that. Forward a job post to apply, or send a command like 'Add Python to my skills'.`
       );
     }
   }
@@ -66,7 +65,14 @@ async function startJobProcessing(chatId: number, update: TelegramUpdate, contex
     return;
   }
 
-  await sendMessage(chatId, `⚙️ **Processing your job post...** I'll have a tailored CV draft and cover letter ready shortly.`);
+  // 1. Extract text and identify type first to run non-blocking validation
+  const { text: rawText, sourceType } = await extractTextFromUpdate(update);
+  if (!rawText || rawText.trim().length < 20) {
+    await sendMessage(chatId, `❌ **Error:** The job posting details could not be parsed successfully. Please check the content type and send again.`);
+    return;
+  }
+
+  await sendMessage(chatId, `⚙️ **Processing your job post...** I'll have a draft ready in a moment.`);
 
   // Set state to ACTIVE_PROCESSING instantly
   await db.doc(`users/${uid}/botSession/current`).set({
@@ -79,12 +85,6 @@ async function startJobProcessing(chatId: number, update: TelegramUpdate, contex
   });
 
   try {
-    // 1. Extract raw job description
-    const rawText = await extractRawTextFromUpdate(update, uid);
-    if (!rawText || rawText.trim().length < 20) {
-      throw new Error("Specified input yields insufficient job details text content.");
-    }
-
     // 2. Extract job specifications via Gemini
     const jobDetails = await extractJobDetails(rawText);
 
@@ -104,16 +104,23 @@ async function startJobProcessing(chatId: number, update: TelegramUpdate, contex
     const docBytes = await downloadDriveFile(uid, masterCvFileId);
     const parsedCv = await parseDocx(docBytes);
 
-    // 5. Tailor CV with Gemini
-    const tailored = await tailorResume(parsedCv.summary, parsedCv.skills, jobDetails.jobDescription);
+    // 5. Build requirements and tailor resume
+    const jobRequirementsString = [
+      ...(jobDetails.requiredSkills || []),
+      ...(jobDetails.preferredSkills || []),
+      ...(jobDetails.summaryKeywords || []),
+      jobDetails.jobDescription || ''
+    ].join(', ');
+
+    const tailored = await tailorResume(parsedCv.summary, parsedCv.skills, jobRequirementsString);
 
     // 6. Generate cover email with Gemini
-    const candidateName = parsedCv.name || context.user?.displayName || 'Ahmed Hassan';
+    const candidateName = context.user?.displayName || parsedCv.name || 'Candidate';
     const emailDraft = await generateCoverEmail({
       candidateName,
       jobTitle: jobDetails.jobTitle || 'Software Engineer',
       company: jobDetails.company || 'Target Company',
-      relevantSkills: jobDetails.requiredSkills,
+      relevantSkills: tailored.newSkills,
       summary: tailored.newSummary
     });
 
@@ -129,19 +136,22 @@ async function startJobProcessing(chatId: number, update: TelegramUpdate, contex
 
     // 9. Store draft record
     const draftId = db.collection(`users/${uid}/drafts`).doc().id;
-    await db.doc(`users/${uid}/drafts/${draftId}`).set({
+    const draftData: DraftDoc = {
       draftId,
       profileId: activeProfileId,
-      company: jobDetails.company || 'Target Company',
-      jobTitle: jobDetails.jobTitle || 'Software Engineer',
+      company: jobDetails.company || 'Unknown Company',
+      jobTitle: jobDetails.jobTitle || 'Unknown Role',
       hrEmail: jobDetails.hrEmail || null,
-      hrEmailConfirmed: !!jobDetails.hrEmail,
+      hrEmailConfirmed: jobDetails.hrEmail !== null,
       status: jobDetails.hrEmail ? 'awaiting_approval' : 'awaiting_email_confirm',
       tailoredCvFileId: tailoredPdfFileId,
       emailSubject: emailDraft.subject,
       emailBody: emailDraft.body,
-      createdAt: new Date()
-    });
+      createdAt: new Date(),
+      jobDescription: jobDetails.jobDescription || rawText,
+      sourceType: sourceType as any
+    };
+    await db.doc(`users/${uid}/drafts/${draftId}`).set(draftData);
 
     // 10. Transition state
     const nextState = jobDetails.hrEmail ? 'AWAITING_APPROVAL' : 'AWAITING_EMAIL_CONFIRM';
@@ -155,24 +165,13 @@ async function startJobProcessing(chatId: number, update: TelegramUpdate, contex
       botState: nextState
     });
 
-    // 11. Deliver review package
+    // 11. Deliver review package or request email
     if (jobDetails.hrEmail) {
-      await sendReviewPackage(chatId, {
-        draftId,
-        company: jobDetails.company || 'Target Company',
-        jobTitle: jobDetails.jobTitle || 'Software Engineer',
-        hrEmail: jobDetails.hrEmail,
-        emailSubject: emailDraft.subject,
-        emailBody: emailDraft.body,
-        pdfBuffer,
-        pdfName
-      });
+      await sendReviewPackage(context, draftData);
     } else {
       await sendMessage(
         chatId,
-        `🔍 **HR Email Not Found**\n\n` +
-        `I have generated your tailored CV PDF but I could not find an HR email address in the job posting.\n\n` +
-        `Please type the **HR email address** below now, or reply **"skip"** to discard this application.`
+        `🔍 **HR Email Not Found** — I couldn't find a contact email in the job post. Please type the HR or hiring manager's email address now, or type \`skip\` to discard this application.`
       );
     }
 
@@ -187,42 +186,6 @@ async function startJobProcessing(chatId: number, update: TelegramUpdate, contex
     });
     await sendMessage(chatId, `❌ **Ingestion Failed:** ${error?.message || error}`);
   }
-}
-
-async function extractRawTextFromUpdate(update: TelegramUpdate, uid: string): Promise<string> {
-  const msg = update.message;
-  if (!msg) return '';
-
-  if (msg.text) {
-    return msg.text;
-  }
-
-  if (msg.photo && msg.photo.length > 0) {
-    const largestPhoto = msg.photo.reduce((prev, current) => {
-      return (prev.file_size || 0) > (current.file_size || 0) ? prev : current;
-    });
-
-    const fileInfo = await getFile(largestPhoto.file_id);
-    const fileBuffer = await downloadFile(fileInfo.file_path);
-
-    const prompt = `You are a professional career coordinator. Extract all listing specifications, requirement details, and experience information from this attached job posting screenshot.
-
-Return only valid JSON. Do not write anything else.
-{
-  "fullText": string
-}`;
-    const ocrResult = await callGeminiVision(fileBuffer, 'image/jpeg', prompt);
-    return ocrResult?.fullText || '';
-  }
-
-  if (msg.document && msg.document.mime_type === 'application/pdf') {
-    const fileInfo = await getFile(msg.document.file_id);
-    const fileBuffer = await downloadFile(fileInfo.file_path);
-    const data = await pdfParse(fileBuffer);
-    return data.text || '';
-  }
-
-  return '';
 }
 
 async function handleProfileSwitch(chatId: number, text: string, context: UserContext): Promise<void> {
@@ -369,40 +332,46 @@ async function handleNaturalCommand(chatId: number, text: string, context: UserC
   }
 }
 
-export async function sendReviewPackage(chatId: number, details: {
-  draftId: string;
-  company: string;
-  jobTitle: string;
-  hrEmail: string;
-  emailSubject: string;
-  emailBody: string;
-  pdfBuffer: Buffer;
-  pdfName: string;
-}): Promise<void> {
-  // Attached Tailored Resume
-  await sendDocument(
-    chatId,
-    details.pdfBuffer,
-    details.pdfName,
-    `📂 **Tailored Resume PDF** for ${details.company}`
-  );
+async function handleSetMonitoringChannel(chatId: number, text: string, context: UserContext): Promise<void> {
+  const db = getAdminDb();
+  const uid = context.uid;
 
-  const preview = `📥 **Application Draft Ready — Please Review**\n\n` +
-    `**To:** \`${details.hrEmail}\`\n` +
-    `**Subject:** *${details.emailSubject}*\n\n` +
-    `**Email Body:**\n` +
-    `\`\`\`\n${details.emailBody}\n\`\`\``;
+  // Simple regex matching Telegram channel handle like @mychannel or numeric ID like -100123456
+  const match = text.match(/(@\w+|-100\d+|-?\d+)/);
+  if (!match) {
+    await sendMessage(
+      chatId,
+      `⚠️ **Invalid Channel Format:** Please provide a valid channel handle starting with \`@\` or a numeric ID (e.g. \`Set monitoring channel to @mychannel\`).`
+    );
+    return;
+  }
 
-  const replyMarkup = {
-    inline_keyboard: [
-      [{ text: '🚀 Looks Perfect — Send Now', callback_data: `send_now:${details.draftId}` }],
-      [{ text: '✏️ Edit Email Body', callback_data: `edit_email:${details.draftId}` }],
-      [{ text: '🗑️ Discard Draft', callback_data: `discard_draft:${details.draftId}` }]
-    ]
-  };
+  const channelIdentifier = match[0];
 
-  await sendMessage(chatId, preview, {
-    parse_mode: 'Markdown',
-    reply_markup: replyMarkup
-  });
+  try {
+    // Attempt to post confirmation message to channel
+    await sendMessage(
+      Number(channelIdentifier) || (channelIdentifier as any),
+      `✅ <b>Applyr monitoring channel connected.</b> You'll receive activity alerts here.`,
+      { parse_mode: 'HTML' }
+    );
+
+    // Save identifier to users/{uid}.monitoringChannelId
+    await db.doc(`users/${uid}`).update({
+      monitoringChannelId: channelIdentifier
+    });
+
+    await sendMessage(
+      chatId,
+      `✅ **Monitoring channel set!** I'll post activity summaries to \`${channelIdentifier}\` from now on.`
+    );
+
+  } catch (err) {
+    console.warn(`Failed to verify or write to channel ${channelIdentifier}:`, err);
+    await sendMessage(
+      chatId,
+      `❌ I couldn't post to that channel. Make sure you've added me as an admin with 'Post Messages' permission, then try again.`
+    );
+  }
 }
+

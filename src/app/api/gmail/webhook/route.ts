@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { after } from 'next/server';
 import { getAdminDb } from '../../../../lib/firebase/admin';
-import { getValidAccessToken } from '../../../../lib/google/oauth';
-import { sendMessage } from '../../../../lib/telegram/bot';
+import { Timestamp } from 'firebase-admin/firestore';
+import { getHistorySince, getMessage } from '../../../../lib/google/gmail';
+import { loadUserContext } from '../../../../lib/userContext';
+import { postRecruiterReplyAlert } from '../../../../lib/telegram/monitoring';
+import { logError } from '../../../../lib/logger';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
@@ -24,135 +27,105 @@ export async function POST(request: NextRequest) {
         const decodedText = Buffer.from(body.message.data, 'base64').toString('utf-8');
         const watchPayload = JSON.parse(decodedText);
         
-        const { emailAddress, historyId: startHistoryId } = watchPayload;
-        if (!emailAddress || !startHistoryId) return;
+        const { emailAddress, historyId: payloadHistoryId } = watchPayload;
+        if (!emailAddress || !payloadHistoryId) return;
 
         const db = getAdminDb();
         
-        // Find matching connected google credential context
-        const googleConfigs = await db.collectionGroup('google')
+        // Find matching connected google credential context (collectionGroup config matches doc path users/{uid}/config/google)
+        const googleConfigs = await db.collectionGroup('config')
           .where('connectedEmail', '==', emailAddress)
           .get();
 
-        if (googleConfigs.empty) return;
+        if (googleConfigs.empty) {
+          return;
+        }
 
         const configDoc = googleConfigs.docs[0];
         const configPathParts = configDoc.ref.path.split('/');
         const uid = configPathParts[1];
 
-        const userDoc = await db.doc(`users/${uid}`).get();
-        if (!userDoc.exists) return;
-        const userData = userDoc.data() as any;
+        const userContext = await loadUserContext(uid);
+        if (!userContext || !userContext.user) {
+          return;
+        }
 
         const googleConfig = configDoc.data() as any;
         const lastKnownHistoryId = googleConfig.gmailHistoryId;
 
-        // Decrypt connection credentials
-        const accessToken = await getValidAccessToken(uid);
-
-        // Save new history ID reference
-        await configDoc.ref.update({ gmailHistoryId: String(startHistoryId) });
-
         // Retrieve Gmail thread additions delta
-        let historyUrl = `https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=${lastKnownHistoryId || startHistoryId}`;
-        const historyResponse = await fetch(historyUrl, {
-          headers: { 'Authorization': `Bearer ${accessToken}` }
-        });
-
-        if (!historyResponse.ok) {
-          console.warn('Gmail history retrieve failure:', await historyResponse.text());
+        if (!lastKnownHistoryId) {
+          // If no historyId is stored yet, we save this payload's historyId as baseline and skip processing history now
+          await configDoc.ref.update({ gmailHistoryId: String(payloadHistoryId) });
           return;
         }
 
-        const historyResult = await historyResponse.json();
-        if (!historyResult.history) return;
+        const newMessageIds = await getHistorySince(uid, lastKnownHistoryId);
 
-        const newMessageIds: string[] = [];
-        for (const record of historyResult.history) {
-          if (record.messagesAdded) {
-            for (const item of record.messagesAdded) {
-              if (item.message && item.message.id) {
-                newMessageIds.push(item.message.id);
-              }
+        for (const msgId of newMessageIds) {
+          try {
+            const msgInfo = await getMessage(uid, msgId);
+            
+            // Check if message is a sent message (has SENT label) to exclude
+            if (msgInfo.labelIds && msgInfo.labelIds.includes('SENT')) {
+              continue;
             }
-          }
-        }
 
-        // De-duplicate gathered IDs
-        const uniqueMessageIds = Array.from(new Set(newMessageIds));
+            const fromEmail = msgInfo.from.toLowerCase();
 
-        for (const msgId of uniqueMessageIds) {
-          // Fetch raw headers & snippets
-          const msgUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msgId}`;
-          const msgResponse = await fetch(msgUrl, {
-            headers: { 'Authorization': `Bearer ${accessToken}` }
-          });
-          if (!msgResponse.ok) continue;
-
-          const msgData = await msgResponse.json();
-          const headers = msgData.payload?.headers || [];
-          
-          let fromValue = '';
-          let subjectValue = '';
-          for (const h of headers) {
-            const nameLower = h.name.toLowerCase();
-            if (nameLower === 'from') fromValue = h.value;
-            if (nameLower === 'subject') subjectValue = h.value;
-          }
-
-          if (!fromValue) continue;
-
-          // Parse matching clean email address
-          const emailMatch = fromValue.match(/<([^>]+)>/) || [null, fromValue];
-          const senderEmail = (emailMatch[1] || fromValue).trim().toLowerCase();
-
-          // Verify if sender email is currently logged under active applications
-          const applicationsSnap = await db.collection(`users/${uid}/applications`)
-            .where('hrEmail', '==', senderEmail)
-            .get();
-
-          if (applicationsSnap.empty) continue;
-
-          // Loop applications matching the sender's email ID
-          for (const doc of applicationsSnap.docs) {
-            const app = doc.data() as any;
-
-            // Mark recruiter replied
-            await doc.ref.update({
-              recruiterReplied: true,
-              lastReplyAt: new Date(),
-              lastReplySnippet: msgData.snippet || 'No message content preview available.'
+            // Find matching applications (case-insensitive match)
+            const applicationsSnap = await db.collection(`users/${uid}/applications`).get();
+            const matchingAppDocs = applicationsSnap.docs.filter(docSnap => {
+              const appData = docSnap.data();
+              return appData.hrEmail && appData.hrEmail.toLowerCase() === fromEmail;
             });
 
-            // Trigger real-time private channel alert
-            const monitoringChannelId = userData.monitoringChannelId;
-            if (monitoringChannelId) {
-              const alertMsg = `📬 **Recruiter Reply Detected**\n` +
-                `─────────────────────────────\n` +
-                `🏢 **Company:**   ${app.company}\n` +
-                `💼 **Role:**      ${app.jobTitle}\n` +
-                `👤 **From:**      ${fromValue}\n` +
-                `🕐 **Received:**  ${new Date().toLocaleTimeString()} · ${new Date().toLocaleDateString()}\n` +
-                `💬 **Preview:**   *"${msgData.snippet || 'No snippet'}"*\n` +
-                `─────────────────────────────\n` +
-                `Update Status → ${process.env.NEXT_PUBLIC_APP_URL || 'https://applyr.vercel.app'}/dashboard/applications`;
+            for (const appDoc of matchingAppDocs) {
+              const application = { id: appDoc.id, ...appDoc.data() } as any;
 
-              await sendMessage(monitoringChannelId, alertMsg, { parse_mode: 'Markdown' }).catch((err) => {
-                console.warn('Telegram monitoring alert failed:', err);
+              // Update the application
+              const lastReplyAtTimestamp = Timestamp.fromMillis(Number(msgInfo.internalDate));
+              const replySnippet = msgInfo.snippet.slice(0, 200);
+
+              await appDoc.ref.update({
+                recruiterReplied: true,
+                lastReplyAt: lastReplyAtTimestamp,
+                lastReplySnippet: replySnippet
+              });
+
+              // Construct updated application record
+              const updatedAppRecord = {
+                ...application,
+                recruiterReplied: true,
+                lastReplyAt: lastReplyAtTimestamp,
+                lastReplySnippet: replySnippet
+              };
+
+              await postRecruiterReplyAlert(userContext, updatedAppRecord, {
+                from: msgInfo.from,
+                snippet: msgInfo.snippet,
+                internalDate: msgInfo.internalDate
+              }).catch(err => {
+                logError('gmail-webhook-post-alert', err);
               });
             }
+          } catch (msgErr) {
+            logError('gmail-webhook-msg-process', msgErr);
           }
         }
 
+        // Update to latest historyId
+        await configDoc.ref.update({ gmailHistoryId: String(payloadHistoryId) });
+
       } catch (childErr) {
-        console.error('Child webhook notification flow failed:', childErr);
+        logError('gmail-webhook-child-thread', childErr);
       }
     });
 
     return res;
 
   } catch (error: any) {
-    console.error('Core Gmail listener webhook crash:', error);
+    logError('gmail-webhook-root', error);
     return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
   }
 }

@@ -4,6 +4,7 @@ import { getAdminDb } from '../../../lib/firebase/admin';
 import { loadUserContext } from '../../../lib/userContext';
 import { routeUpdate } from '../../../lib/telegram/states';
 import { sendMessage } from '../../../lib/telegram/bot';
+import { logError } from '../../../lib/logger';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
@@ -14,7 +15,7 @@ export async function POST(request: NextRequest) {
     const secretToken = process.env.TELEGRAM_WEBHOOK_SECRET;
 
     if (secretToken && secretTokenHeader !== secretToken) {
-      console.warn('Unauthorized telegram-webhook request. Invalid secret token header.');
+      logError('telegram-webhook-unauthorized', 'Unauthorized telegram-webhook request. Invalid secret token header.');
       return new Response('Forbidden', { status: 403 });
     }
 
@@ -38,7 +39,6 @@ export async function POST(request: NextRequest) {
         }
 
         if (!telegramUserId) {
-          console.warn('No telegram_user_id found in update payload');
           return;
         }
 
@@ -51,10 +51,22 @@ export async function POST(request: NextRequest) {
           const firebaseUid = mappingData?.firebaseUid;
 
           if (firebaseUid) {
+            // Idempotency check: store and inspect update_id
+            if (update.update_id) {
+              const botSessionRef = db.doc(`users/${firebaseUid}/botSession/current`);
+              const sessionSnap = await botSessionRef.get();
+              if (sessionSnap.exists) {
+                const sessionData = sessionSnap.data();
+                const lastId = sessionData?.lastUpdateId || 0;
+                if (update.update_id <= lastId) {
+                  return; // Skip duplicate processing
+                }
+              }
+              await botSessionRef.set({ lastUpdateId: update.update_id }, { merge: true });
+            }
+
             const context = await loadUserContext(firebaseUid);
             await routeUpdate(update, context);
-          } else {
-            console.warn(`No firebaseUid in mapping for user: ${telegramUserId}`);
           }
         } else {
           // If no mapping, check if message is a pairing deep-link
@@ -71,6 +83,12 @@ export async function POST(request: NextRequest) {
                 if (tokenData && !tokenData.used) {
                   const firebaseUid = tokenData.firebaseUid;
                   const context = await loadUserContext(firebaseUid);
+                  
+                  if (update.update_id) {
+                    const botSessionRef = db.doc(`users/${firebaseUid}/botSession/current`);
+                    await botSessionRef.set({ lastUpdateId: update.update_id }, { merge: true });
+                  }
+
                   await routeUpdate(update, context);
                   return;
                 }
@@ -89,13 +107,13 @@ export async function POST(request: NextRequest) {
           }
         }
       } catch (backgroundError) {
-        console.error('Error during background processing of telegram update:', backgroundError);
+        logError('telegram-webhook-background', backgroundError);
       }
     });
 
     return response;
   } catch (error: any) {
-    console.error('Error in Telegram Webhook endpoint:', error);
+    logError('telegram-webhook-root', error);
     return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
   }
 }

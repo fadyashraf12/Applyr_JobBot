@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAdminDb, getAdminAuth } from '../../../lib/firebase/admin';
+import { logError } from '../../../lib/logger';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
@@ -14,7 +15,7 @@ async function getAuthorizedUid(request: NextRequest): Promise<string | null> {
       const decoded = await getAdminAuth().verifyIdToken(idToken);
       uid = decoded.uid;
     } catch (err) {
-      console.warn('ID token verification failed in applications route:', err);
+      logError('api-applications-auth-idtoken', err);
     }
   }
 
@@ -56,8 +57,8 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ applications });
   } catch (error: any) {
-    console.error('Error listing applications:', error);
-    return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
+    logError('api-applications-GET', error);
+    return NextResponse.json({ error: 'Failed to balance application records.' }, { status: 500 });
   }
 }
 
@@ -68,7 +69,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized: Invalid credentials or missing uid' }, { status: 401 });
     }
 
-    const body = await request.json();
+    let body;
+    try {
+      body = await request.json();
+    } catch (parseErr) {
+      return NextResponse.json({ error: 'Malformed request JSON body.' }, { status: 400 });
+    }
+
     const {
       company,
       jobTitle,
@@ -85,8 +92,16 @@ export async function POST(request: NextRequest) {
       sourceType = 'text',
     } = body;
 
-    if (!company || !jobTitle) {
-      return NextResponse.json({ error: 'Missing required fields: company or jobTitle' }, { status: 400 });
+    // Rigid check: Non-empty strings
+    if (!company || typeof company !== 'string' || !company.trim()) {
+      return NextResponse.json({ error: 'Missing or malformed company name.' }, { status: 400 });
+    }
+    if (!jobTitle || typeof jobTitle !== 'string' || !jobTitle.trim()) {
+      return NextResponse.json({ error: 'Missing or malformed job title.' }, { status: 400 });
+    }
+
+    if (profileId && (typeof profileId !== 'string' || !profileId.trim())) {
+      return NextResponse.json({ error: 'Invalid profile identity format.' }, { status: 400 });
     }
 
     const db = getAdminDb();
@@ -98,8 +113,8 @@ export async function POST(request: NextRequest) {
 
     const applicationRecord = {
       applicationId,
-      company,
-      jobTitle,
+      company: company.trim(),
+      jobTitle: jobTitle.trim(),
       hrEmail: hrEmail || '',
       status,
       appliedAt: new Date(),
@@ -122,7 +137,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true, applicationId, application: applicationRecord });
   } catch (error: any) {
-    console.error('Error logging application:', error);
-    return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
+    logError('api-applications-POST', error);
+    return NextResponse.json({ error: 'Failed to create application log safely.' }, { status: 500 });
   }
 }

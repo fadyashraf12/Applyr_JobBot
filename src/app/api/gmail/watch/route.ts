@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAdminDb, getAdminAuth } from '../../../../lib/firebase/admin';
-import { getValidAccessToken } from '../../../../lib/google/oauth';
+import { Timestamp } from 'firebase-admin/firestore';
+import { watchInbox } from '../../../../lib/google/gmail';
+import { logError } from '../../../../lib/logger';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
@@ -15,7 +17,7 @@ async function getAuthorizedUid(request: NextRequest): Promise<string | null> {
       const decoded = await getAdminAuth().verifyIdToken(idToken);
       uid = decoded.uid;
     } catch (err) {
-      console.warn('ID token verification failed in watch route:', err);
+      logError('gmail-watch-auth-warn', err);
     }
   }
 
@@ -34,48 +36,81 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized: Invalid credentials or missing uid' }, { status: 401 });
     }
 
-    // Get decrypted access token
-    const accessToken = await getValidAccessToken(uid);
-
-    // Get current GCP project ID for Pub/sub topic
-    const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID || process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 'applyr-prod';
-    const topicName = `projects/${projectId}/topics/gmail-notifications`;
-
-    // Register Inbox Gmail Watch via Google REST API
-    const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/watch', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        topicName,
-        labelIds: ['INBOX']
-      })
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      return NextResponse.json({ error: `Gmail watch API failure: ${errText}` }, { status: response.status });
-    }
-
-    const data = await response.json();
-    const expiryTimestamp = data.expiration ? new Date(Number(data.expiration)) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const { historyId, expiration } = await watchInbox(uid);
+    const expiryTimestamp = Timestamp.fromMillis(Number(expiration));
 
     const db = getAdminDb();
     await db.doc(`users/${uid}/config/google`).set({
       gmailWatchExpiry: expiryTimestamp,
-      gmailHistoryId: data.historyId || null
+      gmailHistoryId: historyId
     }, { merge: true });
 
     return NextResponse.json({
       success: true,
-      historyId: data.historyId,
-      expiration: expiryTimestamp.toISOString()
+      expiry: expiration
     });
 
   } catch (error: any) {
-    console.error('Error establishing Gmail watch watcher:', error);
+    logError('gmail-watch-POST', error);
+    return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
+  }
+}
+
+export async function GET(request: NextRequest) {
+  try {
+    const uid = await getAuthorizedUid(request);
+    if (!uid) {
+      return NextResponse.json({ error: 'Unauthorized: Invalid credentials or missing uid' }, { status: 401 });
+    }
+
+    const db = getAdminDb();
+    const configSnap = await db.doc(`users/${uid}/config/google`).get();
+    
+    let gmailWatchExpiry = null;
+    let gmailHistoryId = null;
+    
+    if (configSnap.exists) {
+      const data = configSnap.data();
+      gmailWatchExpiry = data?.gmailWatchExpiry || null;
+      gmailHistoryId = data?.gmailHistoryId || null;
+    }
+
+    let renewNeeded = false;
+    let expiryMillis = 0;
+
+    if (!gmailWatchExpiry) {
+      renewNeeded = true;
+    } else {
+      expiryMillis = gmailWatchExpiry.toDate().getTime();
+      const timeDiff = expiryMillis - Date.now();
+      // Renew if expiring within 24 hours
+      if (timeDiff < 24 * 60 * 60 * 1000) {
+        renewNeeded = true;
+      }
+    }
+
+    if (renewNeeded) {
+      const { historyId, expiration } = await watchInbox(uid);
+      const expiryTimestamp = Timestamp.fromMillis(Number(expiration));
+
+      await db.doc(`users/${uid}/config/google`).set({
+        gmailWatchExpiry: expiryTimestamp,
+        gmailHistoryId: historyId
+      }, { merge: true });
+
+      return NextResponse.json({
+        renewed: true,
+        expiry: Number(expiration)
+      });
+    }
+
+    return NextResponse.json({
+      renewed: false,
+      expiry: expiryMillis
+    });
+
+  } catch (error: any) {
+    logError('gmail-watch-GET', error);
     return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
   }
 }

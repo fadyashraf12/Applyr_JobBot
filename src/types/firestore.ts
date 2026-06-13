@@ -74,6 +74,8 @@ export interface DraftDoc {
   emailSubject: string;
   emailBody: string;
   createdAt: any; // Timestamp
+  jobDescription?: string;
+  sourceType?: 'image' | 'text' | 'pdf';
 }
 
 export interface BotSessionDoc {

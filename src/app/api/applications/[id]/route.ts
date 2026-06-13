@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAdminDb, getAdminAuth } from '../../../../lib/firebase/admin';
+import { logError } from '../../../../lib/logger';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
@@ -14,7 +15,7 @@ async function getAuthorizedUid(request: NextRequest): Promise<string | null> {
       const decoded = await getAdminAuth().verifyIdToken(idToken);
       uid = decoded.uid;
     } catch (err) {
-      console.warn('ID token verification failed in applications dynamic route:', err);
+      logError('api-applications-id-auth', err);
     }
   }
 
@@ -35,8 +36,8 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
     }
 
     const { id } = params;
-    if (!id) {
-      return NextResponse.json({ error: 'Missing application ID (id)' }, { status: 400 });
+    if (!id || typeof id !== 'string' || !id.trim()) {
+      return NextResponse.json({ error: 'Missing or malformed application ID' }, { status: 400 });
     }
 
     const db = getAdminDb();
@@ -58,8 +59,8 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
 
     return NextResponse.json({ application: formattedApp });
   } catch (error: any) {
-    console.error('Error fetching application:', error);
-    return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
+    logError('api-applications-id-GET', error);
+    return NextResponse.json({ error: 'Failed to retrieve application details.' }, { status: 500 });
   }
 }
 
@@ -71,11 +72,17 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     }
 
     const { id } = params;
-    if (!id) {
-      return NextResponse.json({ error: 'Missing application ID (id)' }, { status: 400 });
+    if (!id || typeof id !== 'string' || !id.trim()) {
+      return NextResponse.json({ error: 'Missing or malformed application ID' }, { status: 400 });
     }
 
-    const body = await request.json();
+    let body;
+    try {
+      body = await request.json();
+    } catch (parseErr) {
+      return NextResponse.json({ error: 'Malformed request JSON body.' }, { status: 400 });
+    }
+
     const cleanFields: Record<string, any> = {};
 
     // Allow updating specific permitted tracker fields dynamically
@@ -111,12 +118,18 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     const db = getAdminDb();
     const docRef = db.doc(`users/${uid}/applications/${id}`);
     
+    // Explicit security trace: confirm document exists and belongs to user
+    const checkSnap = await docRef.get();
+    if (!checkSnap.exists) {
+      return NextResponse.json({ error: 'Application not found or unauthorized access.' }, { status: 404 });
+    }
+
     await docRef.set(cleanFields, { merge: true });
 
     return NextResponse.json({ success: true, updatedFields: cleanFields });
   } catch (error: any) {
-    console.error('Error patching application:', error);
-    return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
+    logError('api-applications-id-PATCH', error);
+    return NextResponse.json({ error: 'Failed to update application records securely.' }, { status: 500 });
   }
 }
 
@@ -128,18 +141,23 @@ export async function DELETE(request: NextRequest, { params }: { params: { id: s
     }
 
     const { id } = params;
-    if (!id) {
-      return NextResponse.json({ error: 'Missing application ID (id)' }, { status: 400 });
+    if (!id || typeof id !== 'string' || !id.trim()) {
+      return NextResponse.json({ error: 'Missing or malformed application ID' }, { status: 400 });
     }
 
     const db = getAdminDb();
     const docRef = db.doc(`users/${uid}/applications/${id}`);
+
+    const checkSnap = await docRef.get();
+    if (!checkSnap.exists) {
+      return NextResponse.json({ error: 'Application not found or unauthorized access.' }, { status: 404 });
+    }
     
     await docRef.delete();
 
     return NextResponse.json({ success: true });
   } catch (error: any) {
-    console.error('Error deleting application:', error);
-    return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
+    logError('api-applications-id-DELETE', error);
+    return NextResponse.json({ error: 'Failed to purge application record securely.' }, { status: 500 });
   }
 }

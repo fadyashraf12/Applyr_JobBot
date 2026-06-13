@@ -1,12 +1,13 @@
 import { TelegramUpdate } from '../../../types/telegram';
 import { UserContext } from '../../userContext';
 import { getAdminDb } from '../../firebase/admin';
-import { sendMessage, sendDocument } from '../bot';
+import { sendMessage, sendDocument, answerCallbackQuery, editMessageReplyMarkup } from '../bot';
 import { sendEmail } from '../../google/gmail';
 import { downloadFile, updateFile, deleteFile } from '../../google/drive';
 import { buildDocx } from '../../documents/buildDocx';
 import { convertToPdf } from '../../documents/convertToPdf';
-import { sendReviewPackage } from './activeSteadyState';
+import { sendReviewPackage } from '../reviewPackage';
+import { postApplicationSentReceipt } from '../monitoring';
 
 export async function handleActiveProcessing(
   update: TelegramUpdate,
@@ -24,11 +25,23 @@ export async function handleActiveProcessing(
     const cb = update.callback_query;
     const data = cb.data || '';
 
-    if (data.startsWith('send_now:')) {
-      const draftId = data.substring(9);
-      await handleSendNow(chatId, draftId, context);
-    } else if (data.startsWith('edit_email:')) {
-      const draftId = data.substring(11);
+    let draftId = '';
+    if (data.includes(':')) {
+      draftId = data.split(':')[1];
+    } else {
+      draftId = context.botSession?.activeDraftId || '';
+    }
+
+    if (!draftId) {
+      await answerCallbackQuery(cb.id, `❌ Error: Active draft ID not found.`);
+      return;
+    }
+
+    if (data.startsWith('send_now')) {
+      await answerCallbackQuery(cb.id, `Sending now...`);
+      await handleSendNow(chatId, draftId, context, cb.message?.message_id);
+    } else if (data.startsWith('edit_email')) {
+      await answerCallbackQuery(cb.id);
       // Change state to EDITING_EMAIL
       await db.doc(`users/${uid}/botSession/current`).set({
         botState: 'EDITING_EMAIL',
@@ -37,9 +50,9 @@ export async function handleActiveProcessing(
       }, { merge: true });
       await db.doc(`users/${uid}`).update({ botState: 'EDITING_EMAIL' });
 
-      await sendMessage(chatId, `✏️ **Edit Mode Engaged:**\n\nPlease type your new cover email body message content below. I will update the preview package accordingly.`);
-    } else if (data.startsWith('discard_draft:')) {
-      const draftId = data.substring(14);
+      await sendMessage(chatId, `✏️ Type your revised email body below. I'll update the draft and show you the preview again.`);
+    } else if (data.startsWith('discard_draft') || data.startsWith('discard_discard')) {
+      await answerCallbackQuery(cb.id);
       await handleDiscardDraft(chatId, draftId, context);
     }
     return;
@@ -116,14 +129,23 @@ export async function handleActiveProcessing(
     }
 
     if (textMsg.toLowerCase() === 'skip') {
-      await handleDiscardDraft(chatId, draftId, context);
+      const draftSnap = await db.doc(`users/${uid}/drafts/${draftId}`).get();
+      if (draftSnap.exists) {
+        const draft = draftSnap.data() as any;
+        if (draft.tailoredCvFileId) {
+          await deleteFile(uid, draft.tailoredCvFileId).catch(() => null);
+        }
+        await db.doc(`users/${uid}/drafts/${draftId}`).delete();
+      }
+      await resetToSteadyState(uid);
+      await sendMessage(chatId, `🗑️ Draft discarded. Send another job post whenever you're ready.`);
       return;
     }
 
-    // Email regex check
+    // Email validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(textMsg)) {
-      await sendMessage(chatId, `⚠️ **Invalid Email:** Please enter a valid email address (e.g. \`hr@company.com\`), or type \`skip\` to cancel.`);
+      await sendMessage(chatId, `That doesn't look like a valid email address. Please try again, or type \`skip\` to discard this application.`);
       return;
     }
 
@@ -146,19 +168,7 @@ export async function handleActiveProcessing(
       const draftSnap = await db.doc(`users/${uid}/drafts/${draftId}`).get();
       const draft = draftSnap.data() as any;
 
-      const pdfBuffer = await downloadFile(uid, draft.tailoredCvFileId);
-      const companyClean = draft.company.replace(/[^a-zA-Z0-9]/g, '_');
-      
-      await sendReviewPackage(chatId, {
-        draftId,
-        company: draft.company,
-        jobTitle: draft.jobTitle,
-        hrEmail: textMsg,
-        emailSubject: draft.emailSubject,
-        emailBody: draft.emailBody,
-        pdfBuffer,
-        pdfName: `Tailored_CV_${companyClean}.pdf`
-      });
+      await sendReviewPackage(context, draft);
 
     } catch (err: any) {
       console.error('Email confirmation ingestion failed:', err);
@@ -194,19 +204,7 @@ export async function handleActiveProcessing(
       const draftSnap = await db.doc(`users/${uid}/drafts/${draftId}`).get();
       const draft = draftSnap.data() as any;
 
-      const pdfBuffer = await downloadFile(uid, draft.tailoredCvFileId);
-      const companyClean = draft.company.replace(/[^a-zA-Z0-9]/g, '_');
-      
-      await sendReviewPackage(chatId, {
-        draftId,
-        company: draft.company,
-        jobTitle: draft.jobTitle,
-        hrEmail: draft.hrEmail || '',
-        emailSubject: draft.emailSubject,
-        emailBody: textMsg,
-        pdfBuffer,
-        pdfName: `Tailored_CV_${companyClean}.pdf`
-      });
+      await sendReviewPackage(context, draft);
 
     } catch (err: any) {
       console.error('Refining draft email workflow fails:', err);
@@ -216,7 +214,7 @@ export async function handleActiveProcessing(
   }
 }
 
-async function handleSendNow(chatId: number, draftId: string, context: UserContext): Promise<void> {
+async function handleSendNow(chatId: number, draftId: string, context: UserContext, messageId?: number): Promise<void> {
   const db = getAdminDb();
   const uid = context.uid;
 
@@ -241,26 +239,27 @@ async function handleSendNow(chatId: number, draftId: string, context: UserConte
     const pdfName = `Tailored_CV_${companyClean}.pdf`;
 
     // Trigger exact atomic Google API send
-    await sendEmail({
-      uid,
+    await sendEmail(uid, {
       to: hrEmail,
       subject: draft.emailSubject,
       body: draft.emailBody,
-      attachmentBuffer: pdfBuffer,
-      attachmentName: pdfName,
-      attachmentMimeType: 'application/pdf'
+      attachment: {
+        filename: pdfName,
+        buffer: pdfBuffer,
+        mimeType: 'application/pdf'
+      }
     });
 
     // Create persistent CRM Application Record
     const appDocId = db.collection(`users/${uid}/applications`).doc().id;
-    await db.doc(`users/${uid}/applications/${appDocId}`).set({
+    const appRecord = {
       applicationId: appDocId,
       profileId: draft.profileId,
       company: draft.company,
       jobTitle: draft.jobTitle,
-      jobDescription: '', // Keep clean / parsed
+      jobDescription: draft.jobDescription || '',
       hrEmail: hrEmail,
-      status: 'pending',
+      status: 'pending' as const,
       appliedAt: new Date(),
       tailoredCvFileId: draft.tailoredCvFileId,
       emailSubject: draft.emailSubject,
@@ -271,8 +270,12 @@ async function handleSendNow(chatId: number, draftId: string, context: UserConte
       recruiterReplied: false,
       lastReplyAt: null,
       lastReplySnippet: null,
-      sourceType: 'text'
-    });
+      sourceType: draft.sourceType || 'text'
+    };
+    await db.doc(`users/${uid}/applications/${appDocId}`).set(appRecord);
+
+    // Call postApplicationSentReceipt
+    await postApplicationSentReceipt(context, appRecord).catch(() => null);
 
     // Delete draft record
     await db.doc(`users/${uid}/drafts/${draftId}`).delete();
@@ -280,26 +283,12 @@ async function handleSendNow(chatId: number, draftId: string, context: UserConte
     // Reset bot states
     await resetToSteadyState(uid);
 
-    await sendMessage(chatId, `✅ **Success!** Your application has been sent to \`${hrEmail}\` and logged into your Applyr CRM dashboard.`);
-
-    // Send Monitoring Channel alert if configure mapped
-    const userDoc = await db.doc(`users/${uid}`).get();
-    const monitoringChannelId = userDoc.data()?.monitoringChannelId;
-
-    if (monitoringChannelId) {
-      const channelMsg = `✅ **Application Sent**\n` +
-        `─────────────────────\n` +
-        `🏢 **Company:**   ${draft.company}\n` +
-        `💼 **Role:**      ${draft.jobTitle}\n` +
-        `📧 **Sent to:**   \`${hrEmail}\`\n` +
-        `🕐 **Time:**      ${new Date().toLocaleTimeString()} · ${new Date().toLocaleDateString()}\n` +
-        `─────────────────────\n` +
-        `Track App → ${process.env.NEXT_PUBLIC_APP_URL || 'https://applyr.vercel.app'}/dashboard/applications`;
-
-      await sendMessage(monitoringChannelId, channelMsg, { parse_mode: 'Markdown' }).catch((chanErr) => {
-        console.warn('Silent fail dispatching alert to monitoring channel:', chanErr);
-      });
+    // Remove the callback keyboard from the matching preview message of state transitions
+    if (messageId) {
+      await editMessageReplyMarkup(chatId, messageId, { inline_keyboard: [] }).catch(() => null);
     }
+
+    await sendMessage(chatId, `✅ Email sent to ${hrEmail}. Application logged in your dashboard.`);
 
   } catch (err: any) {
     console.error('Final deployment send atomic workflow fails:', err);
@@ -317,7 +306,6 @@ async function handleDiscardDraft(chatId: number, draftId: string, context: User
     if (draftSnap.exists) {
       const draft = draftSnap.data() as any;
       if (draft.tailoredCvFileId) {
-        // Delete working CV pdf copy from Cloud Drive to avoid clutter as specified in spec
         await deleteFile(uid, draft.tailoredCvFileId).catch(() => null);
       }
       await db.doc(`users/${uid}/drafts/${draftId}`).delete();
@@ -327,7 +315,7 @@ async function handleDiscardDraft(chatId: number, draftId: string, context: User
   }
 
   await resetToSteadyState(uid);
-  await sendMessage(chatId, `🗑️ **Draft Discarded.** Send another job listing whenever you're ready.`);
+  await sendMessage(chatId, `🗑️ Draft discarded. Send another job post whenever you're ready.`);
 }
 
 async function resetToSteadyState(uid: string): Promise<void> {
