@@ -1,6 +1,11 @@
 {
   "buildCommand": "npm run build && npm run build:api",
   "outputDirectory": "dist",
+  "functions": {
+    "api/index.cjs": {
+      "runtime": "@vercel/node@5.x"
+    }
+  },
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index" },
     { "source": "/(.*)", "destination": "/index.html" }
