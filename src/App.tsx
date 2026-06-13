@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from 'firebase/auth';
+import { onAuthStateChanged, signInWithPopup, signInWithRedirect, getRedirectResult, GoogleAuthProvider, signOut } from 'firebase/auth';
 import { doc, onSnapshot, collection, updateDoc } from 'firebase/firestore';
 import { auth, db } from './lib/firebase/client';
 
@@ -77,6 +77,17 @@ function App() {
 
   // 1. Firebase authentication observer
   useEffect(() => {
+    // Process redirect sign-in results from potential popup-blocked fallbacks
+    getRedirectResult(auth)
+      .then((result) => {
+        if (result) {
+          console.log('Successfully completed OAuth redirection login:', result.user.email);
+        }
+      })
+      .catch((err) => {
+        console.error('Error processing OAuth redirection logic:', err);
+      });
+
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       setAuthLoading(false);
@@ -140,17 +151,26 @@ function App() {
 
   // Google sign in trigger
   const handleGoogleSignIn = async () => {
-    try {
-      const provider = new GoogleAuthProvider();
-      // Required scopes for Google APIs access
-      provider.addScope('https://www.googleapis.com/auth/drive.file');
-      provider.addScope('https://www.googleapis.com/auth/gmail.send');
-      provider.addScope('https://www.googleapis.com/auth/gmail.readonly');
-      provider.addScope('https://www.googleapis.com/auth/gmail.modify');
+    const provider = new GoogleAuthProvider();
+    // Required scopes for Google APIs access
+    provider.addScope('https://www.googleapis.com/auth/drive.file');
+    provider.addScope('https://www.googleapis.com/auth/gmail.send');
+    provider.addScope('https://www.googleapis.com/auth/gmail.readonly');
+    provider.addScope('https://www.googleapis.com/auth/gmail.modify');
 
+    try {
       await signInWithPopup(auth, provider);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error during Google authentication popups selection:', err);
+      // Check for popup-blocked state to seamlessly process redirect sign in
+      if (err?.code === 'auth/popup-blocked' || err?.message?.includes('popup-blocked')) {
+        console.warn('Popup blocked by browser/iframe restrictions. Redirecting for Google sign-in instead...');
+        try {
+          await signInWithRedirect(auth, provider);
+        } catch (redirectErr) {
+          console.error('Failure executing fallback redirect sign-in:', redirectErr);
+        }
+      }
     }
   };
 
