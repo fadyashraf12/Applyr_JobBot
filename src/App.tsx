@@ -70,6 +70,17 @@ function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'applications' | 'vault' | 'profiles'>('dashboard');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
+  // Dynamic document title update
+  useEffect(() => {
+    const tabNames: Record<string, string> = {
+      dashboard: 'Dashboard',
+      applications: 'Applications CRM',
+      vault: 'Cloud Vault',
+      profiles: 'CV Profiles',
+    };
+    document.title = `Applyr | ${tabNames[activeTab] || 'JobBot'}`;
+  }, [activeTab]);
+
   // CRM applications metrics & elements
   const [applications, setApplications] = useState<any[]>([]);
   const [appsLoading, setAppsLoading] = useState(false);
