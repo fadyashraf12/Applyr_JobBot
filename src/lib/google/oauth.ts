@@ -25,32 +25,41 @@ function getOAuthClient(customRedirectUri?: string): any {
 export function buildAuthUrl(service: 'drive' | 'gmail', uid: string, state?: string): string {
   const oauth2Client = getOAuthClient();
   
-  let scopes = service === 'drive'
-    ? ['https://www.googleapis.com/auth/drive.file']
-    : [
-        'https://www.googleapis.com/auth/gmail.send',
-        'https://www.googleapis.com/auth/gmail.readonly',
-        'https://www.googleapis.com/auth/gmail.modify'
-      ];
-
-  // If this is the initial login flow, we need identity scopes
+  // Determine scopes based on service and flow type
+  let scopes: string[] = [];
+  
+  // For login flow, we need identity scopes
   if (uid === 'login_flow') {
     scopes = [
-      ...scopes,
       'openid',
       'https://www.googleapis.com/auth/userinfo.email',
-      'https://www.googleapis.com/auth/userinfo.profile'
+      'https://www.googleapis.com/auth/userinfo.profile',
+      'https://www.googleapis.com/auth/drive.file' // Also request drive for vault setup
     ];
+  } else {
+    // For service-specific scopes after login
+    scopes = service === 'drive'
+      ? ['https://www.googleapis.com/auth/drive.file']
+      : [
+          'https://www.googleapis.com/auth/gmail.send',
+          'https://www.googleapis.com/auth/gmail.readonly',
+          'https://www.googleapis.com/auth/gmail.modify'
+        ];
   }
   
   const finalState = state || `${service}:${uid}`;
 
-  return oauth2Client.generateAuthUrl({
+  const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline', // gets refresh token
     scope: scopes,
     state: finalState,
     prompt: 'consent' // guarantees refresh token is returned
   });
+
+  // Debug log (remove in production)
+  console.log('Generated Auth URL for', uid, ':', authUrl.substring(0, 100) + '...');
+  
+  return authUrl;
 }
 
 // Exchange the authorization code for access + refresh tokens
