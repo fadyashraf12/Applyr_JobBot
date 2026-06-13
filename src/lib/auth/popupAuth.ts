@@ -7,6 +7,7 @@ export interface PopupAuthResult {
   success: boolean;
   error?: string;
   uid?: string;
+  token?: string;
 }
 
 /**
@@ -49,7 +50,8 @@ export function openGoogleAuthPopup(): Promise<PopupAuthResult> {
         // The popup has completed authentication
         // The Firebase client will detect the new user via onAuthStateChanged
         resolve({
-          success: true
+          success: true,
+          token: event.data.token
         });
       } else if (event.data?.type === 'OAUTH_AUTH_ERROR') {
         window.removeEventListener('message', handleMessage);

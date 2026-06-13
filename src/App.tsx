@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { onAuthStateChanged, signOut, signInWithCustomToken } from 'firebase/auth';
 import { doc, onSnapshot, collection, updateDoc } from 'firebase/firestore';
 import { auth, db } from './lib/firebase/client';
 import { openGoogleAuthPopup } from './lib/auth/popupAuth';
@@ -159,7 +159,12 @@ function App() {
       const result = await openGoogleAuthPopup();
       if (!result.success) {
         console.error('Google sign-in failed:', result.error);
-        // Error handling - user will see the login page again
+        return;
+      }
+      
+      // If we got a custom token, sign in with it
+      if (result.token) {
+        await signInWithCustomToken(auth, result.token);
       }
       // If successful, onAuthStateChanged will trigger and update currentUser
     } catch (err) {

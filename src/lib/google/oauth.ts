@@ -24,13 +24,24 @@ function getOAuthClient(customRedirectUri?: string): any {
 // Build the Google OAuth consent URL for a given service
 export function buildAuthUrl(service: 'drive' | 'gmail', uid: string, state?: string): string {
   const oauth2Client = getOAuthClient();
-  const scopes = service === 'drive'
+  
+  let scopes = service === 'drive'
     ? ['https://www.googleapis.com/auth/drive.file']
     : [
         'https://www.googleapis.com/auth/gmail.send',
         'https://www.googleapis.com/auth/gmail.readonly',
         'https://www.googleapis.com/auth/gmail.modify'
       ];
+
+  // If this is the initial login flow, we need identity scopes
+  if (uid === 'login_flow') {
+    scopes = [
+      ...scopes,
+      'openid',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/userinfo.profile'
+    ];
+  }
   
   const finalState = state || `${service}:${uid}`;
 

@@ -27,7 +27,8 @@ export function createApp(): express.Express {
   // GET /api/auth/google/login - Initial login popup for unauthenticated users
   app.get('/api/auth/google/login', async (req, res) => {
     try {
-      const authUrl = buildAuthUrl('drive', 'login_flow');
+      // For initial login, we need identity scopes (openid, email, profile) plus drive for the vault
+    const authUrl = buildAuthUrl('drive', 'login_flow', 'drive:login_flow');
       return res.redirect(authUrl);
     } catch (error: any) {
       logError('api-auth-google-login-init', error);
@@ -131,7 +132,10 @@ export function createApp(): express.Express {
           }
 
           const uid = firebaseUser.uid;
-
+          
+          // Create a custom token for the frontend to sign in to Firebase
+          const customToken = await auth.createCustomToken(uid);
+          
           // Initialize user document with all required fields
           const configRef = db.doc(`users/${uid}/config/google`);
           const updatePayload: Record<string, any> = {
@@ -224,7 +228,7 @@ export function createApp(): express.Express {
                 <script>
                   try {
                     if (window.opener) {
-                      window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
+                      window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: '${customToken}' }, '*');
                       setTimeout(() => {
                         window.close();
                       }, 1200);
