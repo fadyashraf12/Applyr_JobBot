@@ -349,4 +349,4 @@ function App() {
   );
 }
 
-export default ErrorBoundary;
+export default App;
