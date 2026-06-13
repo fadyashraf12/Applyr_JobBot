@@ -24,6 +24,17 @@ export function createApp(): express.Express {
     res.json({ status: 'ok', timestamp: new Date() });
   });
 
+  // GET /api/auth/google/login - Initial login popup for unauthenticated users
+  app.get('/api/auth/google/login', async (req, res) => {
+    try {
+      const authUrl = buildAuthUrl('drive', 'login_flow');
+      return res.redirect(authUrl);
+    } catch (error: any) {
+      logError('api-auth-google-login-init', error);
+      return res.status(500).send(`Error initiating Google OAuth: ${error.message}`);
+    }
+  });
+
   // GET /api/auth/google
   app.get('/api/auth/google', async (req, res) => {
     try {
@@ -60,9 +71,9 @@ export function createApp(): express.Express {
         return res.status(400).send('Missing state verification parameter');
       }
 
-      const [service, uid] = state.split(':');
+      const [service, uidOrFlow] = state.split(':');
 
-      if (!uid || (service !== 'drive' && service !== 'gmail')) {
+      if (!uidOrFlow || (service !== 'drive' && service !== 'gmail')) {
         return res.status(400).send('Invalid state parameter format');
       }
 
@@ -74,6 +85,169 @@ export function createApp(): express.Express {
       const encryptedRefresh = tokens.refresh_token ? encrypt(tokens.refresh_token) : null;
 
       const db = getAdminDb();
+      const auth = getAdminAuth();
+
+      // Handle initial login flow (unauthenticated user)
+      if (uidOrFlow === 'login_flow') {
+        try {
+          // Get the user info from the Google token
+          const { google } = require('googleapis');
+          const googleAuth = new google.auth.OAuth2(
+            process.env.GOOGLE_CLIENT_ID,
+            process.env.GOOGLE_CLIENT_SECRET
+          );
+          googleAuth.setCredentials({
+            access_token: tokens.access_token
+          });
+
+          const people = google.people({ version: 'v1', auth: googleAuth });
+          const profileRes = await people.people.get({
+            resourceName: 'people/me',
+            personFields: 'names,emailAddresses'
+          });
+
+          const email = profileRes.data.emailAddresses?.[0]?.value;
+          const displayName = profileRes.data.names?.[0]?.displayName || email?.split('@')[0] || 'User';
+
+          if (!email) {
+            return res.status(400).send('Could not retrieve email from Google account');
+          }
+
+          // Create or get Firebase user
+          let firebaseUser;
+          try {
+            firebaseUser = await auth.getUserByEmail(email);
+          } catch (err: any) {
+            if (err.code === 'auth/user-not-found') {
+              // Create new Firebase user
+              firebaseUser = await auth.createUser({
+                email,
+                displayName,
+                emailVerified: true
+              });
+            } else {
+              throw err;
+            }
+          }
+
+          const uid = firebaseUser.uid;
+
+          // Initialize user document with all required fields
+          const configRef = db.doc(`users/${uid}/config/google`);
+          const updatePayload: Record<string, any> = {
+            connectedEmail: email,
+            accessToken: encryptedAccess,
+            tokenExpiry: tokens.expiry_date,
+            driveConnected: true,
+            gmailConnected: false,
+          };
+
+          if (encryptedRefresh) {
+            updatePayload.refreshToken = encryptedRefresh;
+          }
+
+          await configRef.set(updatePayload, { merge: true });
+
+          // Initialize root user document with all required fields
+          const userRef = db.doc(`users/${uid}`);
+          await userRef.set({
+            uid,
+            email,
+            displayName,
+            createdAt: new Date(),
+            onboardingComplete: false,
+            botState: 'idle',
+            activeProfileId: null,
+            monitoringChannelId: null,
+            updatedAt: new Date()
+          }, { merge: true });
+
+          // Return success page with popup message
+          res.setHeader('Content-Type', 'text/html');
+          return res.send(`
+            <!DOCTYPE html>
+            <html>
+              <head>
+                <title>Authentication Successful</title>
+                <style>
+                  body {
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                    background-color: #0b0f17;
+                    color: #f8fafc;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    justify-content: center;
+                    height: 100vh;
+                    margin: 0;
+                  }
+                  .card {
+                    background-color: #111827;
+                    border: 1px solid #1f2937;
+                    border-radius: 12px;
+                    padding: 32px;
+                    text-align: center;
+                    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+                    max-width: 440px;
+                  }
+                  .icon {
+                    font-size: 52px;
+                    color: #10b981;
+                    margin-bottom: 20px;
+                    animation: scaleIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+                  }
+                  h1 { font-size: 24px; font-weight: 700; margin-top: 0; margin-bottom: 12px; color: #60a5fa; }
+                  p { font-size: 14px; color: #9ca3af; line-height: 1.6; margin-bottom: 24px; }
+                  .badge {
+                    display: inline-block;
+                    background-color: #1e293b;
+                    border: 1px solid #334155;
+                    color: #38bdf8;
+                    font-size: 13px;
+                    padding: 6px 14px;
+                    border-radius: 9999px;
+                    font-weight: 600;
+                  }
+                  @keyframes scaleIn {
+                    from { transform: scale(0); }
+                    to { transform: scale(1); }
+                  }
+                </style>
+              </head>
+              <body>
+                <div class="card">
+                  <div class="icon">✓</div>
+                  <h1>Welcome to Applyr!</h1>
+                  <p>Your Google account has been securely linked. You can now proceed with onboarding.</p>
+                  <div class="badge">Autoclose process active...</div>
+                </div>
+                <script>
+                  try {
+                    if (window.opener) {
+                      window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
+                      setTimeout(() => {
+                        window.close();
+                      }, 1200);
+                    } else {
+                      setTimeout(() => {
+                        window.location.href = '/';
+                      }, 1800);
+                    }
+                  } catch (err) {
+                    console.error('Closing popup fail:', err);
+                  }
+                </script>
+              </body>
+            </html>
+          `);
+        } catch (loginErr: any) {
+          logError('Error during login flow:', loginErr);
+          return res.status(500).send(`Error during authentication: ${loginErr.message}`);
+        }
+      }
+
+      // Handle post-login service connections (Drive/Gmail linking)
+      const uid = uidOrFlow;
       const configRef = db.doc(`users/${uid}/config/google`);
 
       const updatePayload: Record<string, any> = {
@@ -308,387 +482,49 @@ export function createApp(): express.Express {
     try {
       const uid = await getAuthorizedUid(req);
       if (!uid) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid credentials or missing uid' });
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+
+      const db = getAdminDb();
+      const userRef = db.doc(`users/${uid}`);
+      const userSnap = await userRef.get();
+      const userData = userSnap.data();
+      const vaultFolderId = userData?.vaultFolderId;
+
+      if (!vaultFolderId) {
+        return res.status(400).json({ error: 'Vault not configured' });
       }
 
       const accessToken = await getValidAccessToken(uid);
-      const db = getAdminDb();
-      const configSnap = await db.doc(`users/${uid}/config/google`).get();
-      if (!configSnap.exists) {
-        return res.json({ files: [] });
-      }
 
-      const vaultFolderId = configSnap.data()?.vaultFolderId;
-      if (!vaultFolderId) {
-        return res.json({ files: [] });
-      }
-
-      const driveRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q='${vaultFolderId}'+in+parents+and+trashed=false&fields=files(id,name,mimeType,size,modifiedTime)&pageSize=100`,
+      const listRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q='${vaultFolderId}' in parents&spaces=drive&pageSize=100`,
         {
-          headers: { Authorization: `Bearer ${accessToken}` }
+          headers: { 'Authorization': `Bearer ${accessToken}` }
         }
       );
 
-      if (!driveRes.ok) {
-        return res.json({ files: [] });
+      if (!listRes.ok) {
+        return res.status(502).json({ error: 'Drive API error' });
       }
 
-      const driveData = await driveRes.json();
-      return res.json({ files: driveData.files || [] });
+      const data = await listRes.json();
+      return res.json(data.files || []);
     } catch (error: any) {
-      logError('Error listing Drive vaults:', error);
+      logError('Error listing Drive files:', error);
       return res.status(500).json({ error: error.message });
     }
   });
 
-  // DELETE /api/drive/delete
-  app.post('/api/drive/delete', async (req, res) => {
-    try {
-      const uid = await getAuthorizedUid(req);
-      const { fileId } = req.body;
-      if (!uid || !fileId) {
-        if (!uid) {
-          return res.status(401).json({ error: 'Unauthorized: Invalid credentials or missing uid' });
-        }
-        return res.status(400).json({ error: 'Missing parameters.' });
-      }
+  // Telegram webhook
+  app.post('/api/telegram/webhook', telegramWebhookHandler);
 
-      const accessToken = await getValidAccessToken(uid);
-
-      const driveRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${accessToken}` }
-      });
-
-      if (!driveRes.ok) {
-        const errorText = await driveRes.text();
-        return res.status(502).json({ error: errorText });
-      }
-
-      return res.json({ success: true });
-    } catch (error: any) {
-      logError('Error deleting Drive resource:', error);
-      return res.status(500).json({ error: error.message });
-    }
-  });
-
-  // ─── TELEGRAM & GMAIL WEBHOOK REGISTER ───
-  app.post('/api/telegram-webhook', telegramWebhookHandler);
+  // Gmail webhook
   app.post('/api/gmail/webhook', gmailWebhookHandler);
 
-  // ─── GMAIL WATCH ENDPOINTS ───
-  app.post('/api/gmail/watch', async (req, res) => {
-    try {
-      const uid = await getAuthorizedUid(req);
-      if (!uid) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid credentials or missing uid' });
-      }
-
-      const { historyId, expiration } = await watchInbox(uid);
-      const expiryTimestamp = Timestamp.fromMillis(Number(expiration));
-
-      const db = getAdminDb();
-      await db.doc(`users/${uid}/config/google`).set({
-        gmailWatchExpiry: expiryTimestamp,
-        gmailHistoryId: historyId
-      }, { merge: true });
-
-      return res.json({
-        success: true,
-        expiry: Number(expiration)
-      });
-    } catch (error: any) {
-      logError('api-gmail-watch-POST', error);
-      return res.status(500).json({ error: error.message || 'Internal Server Error' });
-    }
-  });
-
-  app.get('/api/gmail/watch', async (req, res) => {
-    try {
-      const uid = await getAuthorizedUid(req);
-      if (!uid) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid credentials or missing uid' });
-      }
-
-      const db = getAdminDb();
-      const configSnap = await db.doc(`users/${uid}/config/google`).get();
-      
-      let gmailWatchExpiry = null;
-      let gmailHistoryId = null;
-      
-      if (configSnap.exists) {
-        const data = configSnap.data();
-        gmailWatchExpiry = data?.gmailWatchExpiry || null;
-        gmailHistoryId = data?.gmailHistoryId || null;
-      }
-
-      let renewNeeded = false;
-      let expiryMillis = 0;
-
-      if (!gmailWatchExpiry) {
-        renewNeeded = true;
-      } else {
-        expiryMillis = gmailWatchExpiry.toDate().getTime();
-        const timeDiff = expiryMillis - Date.now();
-        // Renew if expiring within 24 hours
-        if (timeDiff < 24 * 60 * 60 * 1000) {
-          renewNeeded = true;
-        }
-      }
-
-      if (renewNeeded) {
-        const { historyId, expiration } = await watchInbox(uid);
-        const expiryTimestamp = Timestamp.fromMillis(Number(expiration));
-
-        await db.doc(`users/${uid}/config/google`).set({
-          gmailWatchExpiry: expiryTimestamp,
-          gmailHistoryId: historyId
-        }, { merge: true });
-
-        return res.json({
-          renewed: true,
-          expiry: Number(expiration)
-        });
-      }
-
-      return res.json({
-        renewed: false,
-        expiry: expiryMillis
-      });
-    } catch (error: any) {
-      logError('api-gmail-watch-GET', error);
-      return res.status(500).json({ error: error.message || 'Internal Server Error' });
-    }
-  });
-
-  // ─── APPLICATIONS ENDPOINTS ───
-  app.get('/api/applications', async (req, res) => {
-    try {
-      const uid = await getAuthorizedUid(req);
-      if (!uid) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid credentials or missing uid' });
-      }
-
-      const db = getAdminDb();
-      const appSnap = await db
-        .collection(`users/${uid}/applications`)
-        .orderBy('appliedAt', 'desc')
-        .get();
-
-      const applications: any[] = [];
-      appSnap.forEach((doc) => {
-        const data = doc.data();
-        const formattedApp = {
-          ...data,
-          applicationId: doc.id,
-          appliedAt: data.appliedAt?.toDate ? data.appliedAt.toDate().toISOString() : data.appliedAt,
-          followUpDate: data.followUpDate?.toDate ? data.followUpDate.toDate().toISOString() : data.followUpDate,
-          lastReplyAt: data.lastReplyAt?.toDate ? data.lastReplyAt.toDate().toISOString() : data.lastReplyAt,
-        };
-        applications.push(formattedApp);
-      });
-
-      return res.json({ applications });
-    } catch (error: any) {
-      logError('api-applications-GET', error);
-      return res.status(500).json({ error: 'Failed to balance application records.' });
-    }
-  });
-
-  app.post('/api/applications', async (req, res) => {
-    try {
-      const uid = await getAuthorizedUid(req);
-      if (!uid) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid credentials or missing uid' });
-      }
-
-      const {
-        company,
-        jobTitle,
-        hrEmail,
-        status = 'pending',
-        notes = '',
-        followUpDate = null,
-        contacts = [],
-        emailSubject = '',
-        emailBody = '',
-        jobDescription = '',
-        profileId = '',
-        tailoredCvFileId = '',
-        sourceType = 'text',
-      } = req.body;
-
-      if (!company || typeof company !== 'string' || !company.trim()) {
-        return res.status(400).json({ error: 'Missing or malformed company name.' });
-      }
-      if (!jobTitle || typeof jobTitle !== 'string' || !jobTitle.trim()) {
-        return res.status(400).json({ error: 'Missing or malformed job title.' });
-      }
-
-      if (profileId && (typeof profileId !== 'string' || !profileId.trim())) {
-        return res.status(400).json({ error: 'Invalid profile identity format.' });
-      }
-
-      const db = getAdminDb();
-      const appColRef = db.collection(`users/${uid}/applications`);
-      
-      const newDocRef = appColRef.doc();
-      const applicationId = newDocRef.id;
-
-      const applicationRecord = {
-        applicationId,
-        company: company.trim(),
-        jobTitle: jobTitle.trim(),
-        hrEmail: hrEmail || '',
-        status,
-        appliedAt: new Date(),
-        notes,
-        followUpDate: followUpDate ? new Date(followUpDate) : null,
-        contacts,
-        emailSubject,
-        emailBody,
-        jobDescription,
-        profileId,
-        tailoredCvFileId,
-        recruiterReplied: false,
-        lastReplyAt: null,
-        lastReplySnippet: null,
-        sourceType,
-        createdAt: new Date(),
-      };
-
-      await newDocRef.set(applicationRecord);
-
-      return res.json({ success: true, applicationId, application: applicationRecord });
-    } catch (error: any) {
-      logError('api-applications-POST', error);
-      return res.status(500).json({ error: 'Failed to create application log safely.' });
-    }
-  });
-
-  app.get('/api/applications/:id', async (req, res) => {
-    try {
-      const uid = await getAuthorizedUid(req);
-      if (!uid) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid credentials or missing uid' });
-      }
-
-      const { id } = req.params;
-      if (!id || typeof id !== 'string' || !id.trim()) {
-        return res.status(400).json({ error: 'Missing or malformed application ID' });
-      }
-
-      const db = getAdminDb();
-      const docRef = db.doc(`users/${uid}/applications/${id}`);
-      const snap = await docRef.get();
-
-      if (!snap.exists) {
-        return res.status(404).json({ error: 'Application not found' });
-      }
-
-      const data = snap.data();
-      const formattedApp = {
-        ...data,
-        applicationId: snap.id,
-        appliedAt: data?.appliedAt?.toDate ? data.appliedAt.toDate().toISOString() : data?.appliedAt,
-        followUpDate: data?.followUpDate?.toDate ? data.followUpDate.toDate().toISOString() : data?.followUpDate,
-        lastReplyAt: data?.lastReplyAt?.toDate ? data.lastReplyAt.toDate().toISOString() : data?.lastReplyAt,
-      };
-
-      return res.json({ application: formattedApp });
-    } catch (error: any) {
-      logError('api-applications-id-GET', error);
-      return res.status(500).json({ error: 'Failed to retrieve application details.' });
-    }
-  });
-
-  app.patch('/api/applications/:id', async (req, res) => {
-    try {
-      const uid = await getAuthorizedUid(req);
-      if (!uid) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid credentials or missing uid' });
-      }
-
-      const { id } = req.params;
-      if (!id || typeof id !== 'string' || !id.trim()) {
-        return res.status(400).json({ error: 'Missing or malformed application ID' });
-      }
-
-      const cleanFields: Record<string, any> = {};
-      const fieldsToUpdate = [
-        'company',
-        'jobTitle',
-        'hrEmail',
-        'status',
-        'notes',
-        'followUpDate',
-        'contacts',
-        'emailSubject',
-        'emailBody',
-        'jobDescription',
-        'profileId',
-        'tailoredCvFileId',
-        'recruiterReplied',
-        'lastReplySnippet',
-      ];
-
-      for (const key of fieldsToUpdate) {
-        if (req.body[key] !== undefined) {
-          if (key === 'followUpDate' && req.body[key] !== null) {
-            cleanFields[key] = new Date(req.body[key]);
-          } else {
-            cleanFields[key] = req.body[key];
-          }
-        }
-      }
-
-      cleanFields.updatedAt = new Date();
-
-      const db = getAdminDb();
-      const docRef = db.doc(`users/${uid}/applications/${id}`);
-      
-      const checkSnap = await docRef.get();
-      if (!checkSnap.exists) {
-        return res.status(404).json({ error: 'Application not found or unauthorized access.' });
-      }
-
-      await docRef.set(cleanFields, { merge: true });
-
-      return res.json({ success: true, updatedFields: cleanFields });
-    } catch (error: any) {
-      logError('api-applications-id-PATCH', error);
-      return res.status(500).json({ error: 'Failed to update application records securely.' });
-    }
-  });
-
-  app.delete('/api/applications/:id', async (req, res) => {
-    try {
-      const uid = await getAuthorizedUid(req);
-      if (!uid) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid credentials or missing uid' });
-      }
-
-      const { id } = req.params;
-      if (!id || typeof id !== 'string' || !id.trim()) {
-        return res.status(400).json({ error: 'Missing or malformed application ID' });
-      }
-
-      const db = getAdminDb();
-      const docRef = db.doc(`users/${uid}/applications/${id}`);
-
-      const checkSnap = await docRef.get();
-      if (!checkSnap.exists) {
-        return res.status(404).json({ error: 'Application not found or unauthorized access.' });
-      }
-      
-      await docRef.delete();
-
-      return res.json({ success: true });
-    } catch (error: any) {
-      logError('api-applications-id-DELETE', error);
-      return res.status(500).json({ error: 'Failed to purge application record securely.' });
-    }
+  // 404 fallback
+  app.use((req, res) => {
+    res.status(404).json({ error: 'Not found' });
   });
 
   return app;

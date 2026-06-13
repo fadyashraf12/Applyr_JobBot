@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { onAuthStateChanged, signInWithPopup, signInWithRedirect, getRedirectResult, GoogleAuthProvider, signOut } from 'firebase/auth';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, onSnapshot, collection, updateDoc } from 'firebase/firestore';
 import { auth, db } from './lib/firebase/client';
+import { openGoogleAuthPopup } from './lib/auth/popupAuth';
 
 // Import newly implemented components
+import LoginPage from './components/auth/LoginPage';
 import OnboardingWizard from './components/onboarding/OnboardingWizard';
 import Sidebar from './components/layout/Sidebar';
 import MobileTopNav from './components/layout/MobileTopNav';
@@ -65,6 +67,7 @@ function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [userProfile, setUserProfile] = useState<any>(null);
   const [profileLoading, setProfileLoading] = useState(false);
+  const [googleSignInLoading, setGoogleSignInLoading] = useState(false);
 
   // Layout navigation tabs
   const [activeTab, setActiveTab] = useState<'dashboard' | 'applications' | 'vault' | 'profiles'>('dashboard');
@@ -88,17 +91,6 @@ function App() {
 
   // 1. Firebase authentication observer
   useEffect(() => {
-    // Process redirect sign-in results from potential popup-blocked fallbacks
-    getRedirectResult(auth)
-      .then((result) => {
-        if (result) {
-          console.log('Successfully completed OAuth redirection login:', result.user.email);
-        }
-      })
-      .catch((err) => {
-        console.error('Error processing OAuth redirection logic:', err);
-      });
-
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       setAuthLoading(false);
@@ -160,28 +152,20 @@ function App() {
     return () => unsubscribe();
   }, [currentUser, userProfile?.onboardingComplete]);
 
-  // Google sign in trigger
+  // Google sign in trigger using popup
   const handleGoogleSignIn = async () => {
-    const provider = new GoogleAuthProvider();
-    // Required scopes for Google APIs access
-    provider.addScope('https://www.googleapis.com/auth/drive.file');
-    provider.addScope('https://www.googleapis.com/auth/gmail.send');
-    provider.addScope('https://www.googleapis.com/auth/gmail.readonly');
-    provider.addScope('https://www.googleapis.com/auth/gmail.modify');
-
+    setGoogleSignInLoading(true);
     try {
-      await signInWithPopup(auth, provider);
-    } catch (err: any) {
-      console.error('Error during Google authentication popups selection:', err);
-      // Check for popup-blocked state to seamlessly process redirect sign in
-      if (err?.code === 'auth/popup-blocked' || err?.message?.includes('popup-blocked')) {
-        console.warn('Popup blocked by browser/iframe restrictions. Redirecting for Google sign-in instead...');
-        try {
-          await signInWithRedirect(auth, provider);
-        } catch (redirectErr) {
-          console.error('Failure executing fallback redirect sign-in:', redirectErr);
-        }
+      const result = await openGoogleAuthPopup();
+      if (!result.success) {
+        console.error('Google sign-in failed:', result.error);
+        // Error handling - user will see the login page again
       }
+      // If successful, onAuthStateChanged will trigger and update currentUser
+    } catch (err) {
+      console.error('Error during Google authentication:', err);
+    } finally {
+      setGoogleSignInLoading(false);
     }
   };
 
@@ -225,64 +209,12 @@ function App() {
     );
   }
 
-  // A: Pre-login Landing Intercept Page
+  // A: Pre-login Landing Page with Modern Design
   if (!currentUser) {
     return (
-      <>
-        <div className="flex flex-col min-h-screen text-slate-100 bg-slate-950 font-sans">
-          {/* Header display */}
-          <header className="sticky top-0 z-45 w-full border-b border-slate-900 bg-slate-950/80 backdrop-blur-md">
-            <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
-              <div className="flex items-center">
-                <img src="/rectangular_logo.svg" alt="Applyr Logo" className="h-9 w-auto" />
-              </div>
-            </div>
-          </header>
-
-          <main className="flex-1 flex flex-col mx-auto w-full max-w-7xl px-6 py-12 justify-center">
-            <div className="max-w-2xl mx-auto text-center space-y-8 py-10">
-              {/* Glowing logo asset frame */}
-              <div className="relative inline-flex">
-                <div className="absolute inset-0 rounded-full bg-indigo-500/20 blur-3xl opacity-60"></div>
-                <img src="/square_logo.svg" alt="Applyr App Emblem" className="h-36 w-36 relative select-none" />
-              </div>
-
-              <div className="space-y-4">
-                <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-white leading-tight">
-                  Automation for <span className="bg-gradient-to-r from-indigo-400 to-violet-400 bg-clip-text text-transparent">Job Seekers</span>
-                </h1>
-                <p className="mx-auto max-w-lg text-sm md:text-base text-slate-400 leading-relaxed">
-                  Integrate your Gmail and Google Drive. Automatically tailor resume sections and cover drafts via Telegram with live push alert answers.
-                </p>
-              </div>
-
-              {/* Crucial account alignment notice callback */}
-              <div className="mx-auto max-w-md p-5 bg-slate-900 border border-slate-800 rounded-xl text-left text-xs text-slate-400 leading-relaxed shadow-lg space-y-2">
-                <p className="font-bold text-slate-200 flex items-center gap-1.5 leading-none">
-                  <span>⚠️</span> Crucial Account Alignment Notice
-                </p>
-                <p className="text-slate-400">
-                  The Google account you select next will be permanently linked to your Applyr workspace. Ensure it is the exact account you wish to host files and compose hiring mails with.
-                </p>
-              </div>
-
-              {/* Sign-in button */}
-              <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-                <button
-                  onClick={handleGoogleSignIn}
-                  className="w-full sm:w-auto h-12 px-8 inline-flex items-center justify-center font-bold text-sm rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-550 shadow-lg shadow-indigo-600/15 transition-all active:scale-95 cursor-pointer"
-                >
-                  Sign in with Google Account
-                </button>
-              </div>
-            </div>
-          </main>
-
-          <footer className="border-t border-slate-900 py-6 text-center text-xs text-slate-600 font-mono tracking-wider">
-            APPLYR PLATFORM V2.0 · INCOMING THREAD READY
-          </footer>
-        </div>
-      </>
+      <ErrorBoundary>
+        <LoginPage onGoogleSignIn={handleGoogleSignIn} isLoading={googleSignInLoading} />
+      </ErrorBoundary>
     );
   }
 
@@ -352,139 +284,69 @@ function App() {
             
             {/* VIEW TAB 1: COCKPIT DASHBOARD */}
             {activeTab === 'dashboard' && (
-              <div className="space-y-8 animate-fade-in">
-                {/* Title and stats layout */}
-                <div className="border-b border-slate-900 pb-5 space-y-1">
-                  <h2 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-                    Seeker Console <span className="text-[10px] bg-indigo-500/10 text-indigo-400 py-0.5 px-2.5 rounded-full font-mono uppercase font-bold tracking-widest border border-indigo-500/10">Mobile First</span>
-                  </h2>
-                  <p className="text-xs sm:text-sm text-slate-400 font-medium">Control career logs, PDF attachments, and active sub-profiles.</p>
+              <div className="space-y-8">
+                <div>
+                  <h1 className="text-3xl font-bold tracking-tight text-white">Dashboard</h1>
+                  <p className="text-sm text-slate-400 mt-1">Track your job applications and manage your profiles</p>
                 </div>
-
-                {/* Secure Telegram Launchpad button */}
                 <TelegramLaunchpad uid={currentUser.uid} />
-
-                {/* Metric counters rows */}
-                {appsLoading ? (
-                  <div className="h-28 bg-slate-900/40 border border-slate-850 animate-pulse rounded-xl flex items-center justify-center">
-                    <span className="text-xs font-mono text-slate-500">AGGREGATING CRM LOGS...</span>
-                  </div>
-                ) : (
-                  <MetricsRow
-                    total={totalAppsCount}
-                    pending={pendingAppsCount}
-                    interviews={interviewAppsCount}
-                  />
-                )}
-
-                {/* Recent submissions block layout */}
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-850 pb-3">
-                    <h3 className="text-xs font-bold uppercase tracking-widest text-slate-450 leading-none">Recent Submissions</h3>
-                    <button
-                      onClick={() => setActiveTab('applications')}
-                      className="text-xs text-indigo-400 font-bold hover:text-indigo-300 transition-colors"
-                    >
-                      View CRM Grid ➜
-                    </button>
-                  </div>
-
-                  {appsLoading ? (
-                    <div className="space-y-3.5">
-                      <div className="h-14 bg-slate-900/60 animate-pulse rounded-lg" />
-                      <div className="h-14 bg-slate-900/60 animate-pulse rounded-lg" />
-                    </div>
-                  ) : (
-                    <ApplicationsList
-                      applications={applications}
-                      onUpdateStatus={handleUpdateStatus}
-                      onSelect={(appId) => {
-                        const target = applications.find((a) => a.applicationId === appId);
-                        setSelectedApp(target || null);
-                      }}
-                    />
-                  )}
-                </div>
+                <MetricsRow
+                  totalAppsCount={totalAppsCount}
+                  pendingAppsCount={pendingAppsCount}
+                  interviewAppsCount={interviewAppsCount}
+                />
               </div>
             )}
 
-            {/* VIEW TAB 2: FULL APPLICATION LIST CRM */}
+            {/* VIEW TAB 2: APPLICATIONS CRM */}
             {activeTab === 'applications' && (
-              <div className="space-y-6 animate-fade-in">
-                <div className="border-b border-slate-900 pb-4 space-y-1">
-                  <h2 className="text-lg font-bold text-white tracking-tight">Job Applications CRM</h2>
-                  <p className="text-xs text-slate-400">Review full job post descriptions, email letters, and active recruiter contact catalogs.</p>
+              <div className="space-y-8">
+                <div>
+                  <h1 className="text-3xl font-bold tracking-tight text-white">Applications</h1>
+                  <p className="text-sm text-slate-400 mt-1">Manage and track all your job applications</p>
                 </div>
-
-                {appsLoading ? (
-                  <div className="h-64 bg-slate-900/40 border border-slate-850 animate-pulse rounded-xl flex items-center justify-center">
-                    <span className="text-xs font-mono text-slate-500">SYNCING LIVE DIRECT STATS...</span>
-                  </div>
-                ) : (
-                  <ApplicationsList
-                    applications={applications}
+                <ApplicationsList
+                  applications={applications}
+                  isLoading={appsLoading}
+                  onSelectApp={setSelectedApp}
+                  onUpdateStatus={handleUpdateStatus}
+                />
+                {selectedApp && (
+                  <ApplicationDetailModal
+                    app={selectedApp}
+                    onClose={() => setSelectedApp(null)}
                     onUpdateStatus={handleUpdateStatus}
-                    onSelect={(appId) => {
-                      const target = applications.find((a) => a.applicationId === appId);
-                      setSelectedApp(target || null);
-                    }}
                   />
                 )}
               </div>
             )}
 
-            {/* VIEW TAB 3: FILE REPOSITORY VAULT */}
+            {/* VIEW TAB 3: VAULT */}
             {activeTab === 'vault' && (
-              <div className="space-y-6 animate-fade-in">
-                <div className="border-b border-slate-900 pb-4 space-y-1">
-                  <h2 className="text-lg font-bold text-white tracking-tight">Cloud Workspace Vault</h2>
-                  <p className="text-xs text-slate-400 font-medium">Browse files, read-only PDF attachments, and active CV modules synced directly in your Drive.</p>
+              <div className="space-y-8">
+                <div>
+                  <h1 className="text-3xl font-bold tracking-tight text-white">Cloud Vault</h1>
+                  <p className="text-sm text-slate-400 mt-1">Access your stored documents and files</p>
                 </div>
                 <VaultExplorer uid={currentUser.uid} />
               </div>
             )}
 
-            {/* VIEW TAB 4: MULTI PROFILE CONFIG */}
+            {/* VIEW TAB 4: PROFILES */}
             {activeTab === 'profiles' && (
-              <div className="space-y-6 animate-fade-in">
-                <div className="border-b border-slate-900 pb-4 space-y-1">
-                  <h2 className="text-lg font-bold text-white tracking-tight">Professional CV Profiles</h2>
-                  <p className="text-xs text-slate-400">Setup specific professional niches, upload custom master attachments, and control matching rules.</p>
+              <div className="space-y-8">
+                <div>
+                  <h1 className="text-3xl font-bold tracking-tight text-white">CV Profiles</h1>
+                  <p className="text-sm text-slate-400 mt-1">Create and manage your CV profiles</p>
                 </div>
                 <ProfileManager uid={currentUser.uid} />
               </div>
             )}
-
           </main>
-
-          {/* Footer element */}
-          <footer className="border-t border-slate-900/80 py-5 text-center text-[10px] text-slate-600 font-mono tracking-widest bg-slate-950/20 shrink-0 select-none">
-            APPLYR PLATFORM V2.0 · CONSOLE SECURED
-          </footer>
-
         </div>
-
-        {/* CRM Detail Modal popup overlay */}
-        {selectedApp && (
-          <ApplicationDetailModal
-            uid={currentUser.uid}
-            application={selectedApp}
-            onClose={() => setSelectedApp(null)}
-            onRefreshList={() => {
-              // snapshot handles of firestore listen to updating state automatically, no manual triggers required
-            }}
-          />
-        )}
-
       </div>
     </>
   );
 }
 
-export default function ErrorBoundaryWrappedApp() {
-  return (
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
-  );
-}
+export default ErrorBoundary;
