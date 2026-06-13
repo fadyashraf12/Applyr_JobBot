@@ -1,11 +1,9 @@
 import express from 'express';
 import { randomUUID } from 'crypto';
-import { Timestamp } from 'firebase-admin/firestore';
 import { google } from 'googleapis';
 import { buildAuthUrl, exchangeCodeForTokens, getValidAccessToken } from '../lib/google/oauth';
 import { encrypt } from '../lib/crypto';
 import { getAdminDb, getAdminAuth } from '../lib/firebase/admin';
-import { watchInbox } from '../lib/google/gmail';
 import { logError } from '../lib/logger';
 import { getAuthorizedUid } from './auth';
 
