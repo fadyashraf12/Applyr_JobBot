@@ -8,3 +8,4 @@ coverage/
 !.env.example
 .env
 api/index.js
+api/index.cjs

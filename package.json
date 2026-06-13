@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "build:api": "esbuild scripts/api-source.ts --bundle --platform=node --format=esm --outfile=api/index.js --external:express --external:firebase-admin --external:googleapis --external:node-telegram-bot-api --external:pdf-lib --external:pdf-parse --external:docx --external:mammoth --external:uuid --external:dotenv --external:firebase --external:@google/generative-ai --external:@google/genai",
+    "build:api": "esbuild scripts/api-source.ts --bundle --platform=node --format=cjs --outfile=api/index.cjs --external:express --external:firebase-admin --external:googleapis --external:node-telegram-bot-api --external:pdf-lib --external:pdf-parse --external:docx --external:mammoth --external:uuid --external:dotenv --external:firebase --external:@google/generative-ai --external:@google/genai",
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"

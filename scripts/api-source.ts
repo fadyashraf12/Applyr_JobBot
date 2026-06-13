@@ -13,5 +13,5 @@ export default function handler(req: any, res: any) {
       return;
     }
   }
-  return app(req, res);
+  app(req, res);
 }
