@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { auth } from '../../lib/firebase/client';
 
 interface TelegramLaunchpadProps {
   uid: string;
@@ -13,11 +14,17 @@ export default function TelegramLaunchpad({ uid }: TelegramLaunchpadProps) {
     setIsLoading(true);
     setErrorMsg(null);
     try {
+      const idToken = await auth.currentUser?.getIdToken();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (idToken) {
+        headers['Authorization'] = `Bearer ${idToken}`;
+      }
+
       const response = await fetch('/api/auth/pair-token', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({ uid }),
       });
 

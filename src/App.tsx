@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from 'firebase/auth';
 import { doc, onSnapshot, collection, updateDoc } from 'firebase/firestore';
 import { auth, db } from './lib/firebase/client';
-import RootLayout from './app/layout';
 
 // Import newly implemented components
 import OnboardingWizard from './components/onboarding/OnboardingWizard';
@@ -16,7 +15,52 @@ import VaultExplorer from './components/vault/VaultExplorer';
 import ProfileManager from './components/profiles/ProfileManager';
 import ApplicationDetailModal from './components/crm/ApplicationDetailModal';
 
-export default function App() {
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, ErrorBoundaryState> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error('Core app boundary caught exception:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex flex-col items-center justify-center min-h-screen text-slate-105 bg-slate-950 font-sans p-6 text-center">
+          <div className="relative inline-flex mb-6">
+            <div className="absolute inset-0 rounded-full bg-red-500/20 blur-3xl opacity-65"></div>
+            <span className="text-5xl relative">⚠️</span>
+          </div>
+          <h1 className="text-2xl font-bold text-red-400 mb-2">Something went wrong</h1>
+          <p className="text-sm text-slate-400 max-w-md mx-auto mb-6 leading-relaxed">
+            The application encountered an unexpected error. Your workspace and sessions remain secure.
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            className="h-10 px-6 inline-flex items-center justify-center font-bold text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-550 transition-all active:scale-95 cursor-pointer"
+          >
+            Reload Page
+          </button>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+function App() {
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [userProfile, setUserProfile] = useState<any>(null);
@@ -138,7 +182,7 @@ export default function App() {
   // Render auth loading screen
   if (authLoading || (currentUser && profileLoading)) {
     return (
-      <RootLayout>
+      <>
         <div className="flex flex-col items-center justify-center min-h-screen text-slate-100 bg-slate-950 font-sans">
           <svg className="animate-spin h-9 w-9 text-indigo-500 mb-4" fill="none" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
@@ -146,14 +190,14 @@ export default function App() {
           </svg>
           <span className="text-slate-400 text-xs font-mono tracking-wider">APPLYR FIREBASE SYNCHRONIZING...</span>
         </div>
-      </RootLayout>
+      </>
     );
   }
 
   // A: Pre-login Landing Intercept Page
   if (!currentUser) {
     return (
-      <RootLayout>
+      <>
         <div className="flex flex-col min-h-screen text-slate-100 bg-slate-950 font-sans">
           {/* Header display */}
           <header className="sticky top-0 z-45 w-full border-b border-slate-900 bg-slate-950/80 backdrop-blur-md">
@@ -207,14 +251,14 @@ export default function App() {
             APPLYR PLATFORM V2.0 · INCOMING THREAD READY
           </footer>
         </div>
-      </RootLayout>
+      </>
     );
   }
 
   // B: Active Onboarding Sequence
   if (!isOnboardingComplete) {
     return (
-      <RootLayout>
+      <>
         <div className="flex flex-col min-h-screen text-slate-100 bg-slate-950 font-sans">
           <header className="sticky top-0 z-40 w-full border-b border-slate-900 bg-slate-950/80 backdrop-blur-md">
             <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
@@ -239,13 +283,13 @@ export default function App() {
             STEPPER ACTIVE · DATA SECURE
           </footer>
         </div>
-      </RootLayout>
+      </>
     );
   }
 
   // C: Seeker Dashboard / Admin Console Main Layout
   return (
-    <RootLayout>
+    <>
       <div className="flex min-h-screen text-slate-150 bg-slate-950 font-sans">
         
         {/* Fixed left sidebar on desktop displays */}
@@ -402,6 +446,14 @@ export default function App() {
         )}
 
       </div>
-    </RootLayout>
+    </>
+  );
+}
+
+export default function ErrorBoundaryWrappedApp() {
+  return (
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   );
 }

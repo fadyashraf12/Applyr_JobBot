@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { auth } from '../../lib/firebase/client';
 
 interface StepCreateVaultProps {
   uid: string;
@@ -16,11 +17,17 @@ export default function StepCreateVault({ uid, onFinish, onBack }: StepCreateVau
     setIsLoading(true);
     setErrorMsg(null);
     try {
+      const idToken = await auth.currentUser?.getIdToken();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (idToken) {
+        headers['Authorization'] = `Bearer ${idToken}`;
+      }
+
       const response = await fetch('/api/onboarding/create-vault', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({
           uid,
           folderName: vaultName,

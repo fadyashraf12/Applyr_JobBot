@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import FileCard from './FileCard';
+import { auth } from '../../lib/firebase/client';
 
 interface DriveFile {
   id: string;
@@ -22,7 +23,15 @@ export default function VaultExplorer({ uid }: VaultExplorerProps) {
     setLoading(true);
     setErrorMsg(null);
     try {
-      const res = await fetch(`/api/drive/files?uid=${uid}`);
+      const idToken = await auth.currentUser?.getIdToken();
+      const headers: Record<string, string> = {};
+      if (idToken) {
+        headers['Authorization'] = `Bearer ${idToken}`;
+      }
+
+      const res = await fetch(`/api/drive/files?uid=${uid}`, {
+        headers,
+      });
       if (!res.ok) {
         throw new Error('Could not connect with your Google Drive. Ensure OAuth permission remains valid.');
       }
@@ -42,11 +51,17 @@ export default function VaultExplorer({ uid }: VaultExplorerProps) {
 
   const handleDeleteFile = async (fileId: string) => {
     try {
+      const idToken = await auth.currentUser?.getIdToken();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (idToken) {
+        headers['Authorization'] = `Bearer ${idToken}`;
+      }
+
       const res = await fetch('/api/drive/delete', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({ uid, fileId }),
       });
 
